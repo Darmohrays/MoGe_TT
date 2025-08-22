@@ -1,0 +1,7 @@
+{
+    "loss": {
+        "global": {"function": "affine_invariant_global_loss", "weight": 1.0, "params": {"align_resolution": 32}},
+        "patch_4": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 4, "align_resolution": 16, "num_patches": 16}},
+        "mask": {"function": "mask_l2_loss", "weight": 1.0}
+    }
+}

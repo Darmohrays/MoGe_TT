@@ -63,7 +63,8 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
 
                 # Inference
                 torch.cuda.synchronize()
-                with torch.inference_mode(), timeit('_inference_timer', verbose=False) as timer:
+                with timeit('_inference_timer', verbose=False) as timer:
+                    # with torch.inference_mode():
                     if oracle_mode:
                         pred = baseline.infer_for_evaluation(image, gt_intrinsics)
                     else:
@@ -87,7 +88,7 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
                     if 'pred_points' in misc:
                         points = misc['pred_points'].cpu().numpy()
                         cv2.imwrite(str(dump_path / 'pred' / 'points.exr'), cv2.cvtColor(points.astype(np.float32), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
-                    
+
                     if 'pred_depth' in misc:
                         depth = misc['pred_depth'].cpu().numpy()
                         if 'mask' in pred:

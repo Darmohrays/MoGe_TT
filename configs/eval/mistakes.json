@@ -1,0 +1,18 @@
+{
+    "DDAD": {
+        "path": "/media/sviatoslav/drive4tb/datasets/monocular_depth/complex_for_mogev1/DDAD",
+        "width": 1400,
+        "height": 700,
+        "include_segmentation": true,
+        "split": ".index.txt",
+        "depth_unit": 1.0
+    },
+    "DIODE": {
+        "path": "/media/sviatoslav/drive4tb/datasets/monocular_depth/complex_for_mogev1/DIODE",
+        "width": 1024,
+        "height": 768,
+        "split": ".index.txt",
+        "include_segmentation": true,
+        "depth_unit": 1.0
+    }
+}
