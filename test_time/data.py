@@ -181,24 +181,20 @@ def generate_jittered_batch(
     image: torch.Tensor,
     moge_output: Dict[str, torch.Tensor],
     batch_size: int,
+    random_state: Optional[int] = None,
+    geometric_aug_severity: int = 3,
+    color_aug_severity: int = 3,
     **jitter_kwargs
 ) -> dict:
     """
-    Generates a batch of jittered point clouds from a single source point cloud.
-
-    Args:
-        image (torch.Tensor): (3, W, H) normalized torch tensor
-        pcd (torch.Tensor): The source (N, 3) point cloud.
-        batch_size (int): The number of jittered versions to create.
-        random_state (int): The master seed for the random number generator.
-        **jitter_kwargs: Keyword arguments passed directly to jitter_pcd_pt.
-
-    Returns:
-        dict: A dictionary containing:
-              - 'pcds': (B, N, 3) tensor of jittered point clouds.
-              - 'transforms': (B, 4, 4) tensor of applied transforms.
-              - 'transforms_inv': (B, 4, 4) tensor of inverse transforms.
+    Generates a batch of jittered point clouds and rendered images from a single source.
     """
+    # ---- Validate severities
+    if not (isinstance(geometric_aug_severity, int) and 0 <= geometric_aug_severity <= 5):
+        raise ValueError("geometric_aug_severity must be an int in [0, 5].")
+    if not (isinstance(color_aug_severity, int) and 0 <= color_aug_severity <= 5):
+        raise ValueError("color_aug_severity must be an int in [0, 5].")
+
     point_map = moge_output['points']
     mask = moge_output['mask']
 
@@ -209,7 +205,74 @@ def generate_jittered_batch(
     cy = moge_output['intrinsics'][1, 2].item() * height
 
     pcd = point_map
-    
+
+    # Optional master RNG for reproducibility
+    gen_master = None
+    if random_state is not None:
+        gen_master = torch.Generator(device=pcd.device)
+        gen_master.manual_seed(int(random_state))
+
+    # ---- Helpers to map severity -> params
+    def _geom_params_from_severity(sev: int, mode: str) -> dict:
+        """Return default jitter params for given severity and mode."""
+        # Max Euler yaw/pitch/roll magnitude (degrees)
+        rot_max_deg = [0.0, 0.5, 1.0, 3.0, 7.5, 15.0][sev]
+        # Translation uniform per-axis range (meters, or scene units)
+        trans_max = [0.0, 0.005, 0.01, 0.02, 0.05, 0.10][sev]
+
+        params = {"trans_range": trans_max}
+        if mode == "euler":
+            r = (-rot_max_deg, rot_max_deg)
+            params.update(dict(roll_deg=r, pitch_deg=r, yaw_deg=r))
+        else:  # axis_angle
+            params.update(dict(sigma_deg=rot_max_deg))
+        return params
+
+    def _build_color_augmentation(sev: int):
+        if sev == 0:
+            return None  # handled downstream (no-op)
+
+        # Ranges increase with severity
+        # Shared ±range for brightness/contrast/saturation
+        bcs = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50][sev]
+        hue_r = [0.0, 0.03, 0.06, 0.10, 0.20, 0.30][sev]
+        gamma_amp = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50][sev]
+
+        # Probabilities scale with severity
+        p_main = min(0.16 * sev, 0.95)              # for ColorJitter
+        p_aux  = min(0.12 * sev, 0.8)               # for hue/sat/auto-contrast
+        p_gs   = min(0.06 * sev, 0.3)               # grayscale
+        p_gamma= min(0.10 * sev, 0.7)               # gamma
+
+        gamma_lo = max(1.0 - gamma_amp, 0.5)
+        gamma_hi = 1.0 + gamma_amp
+        gain_lo  = max(1.0 - 0.1 * sev, 0.5)
+        gain_hi  = 1.0 + 0.1 * sev
+
+        # Compose Kornia augmentations
+        transforms = [
+            K.ColorJitter(
+                brightness=bcs, contrast=bcs, saturation=bcs, hue=hue_r, p=p_main
+            ),
+            K.RandomGamma(gamma=(gamma_lo, gamma_hi), gain=(gain_lo, gain_hi), p=p_gamma),
+            K.RandomHue(hue=(-hue_r, hue_r), p=p_aux),
+            K.RandomSaturation(saturation=(max(1 - bcs, 0.1), 1 + bcs), p=p_aux),
+            K.RandomGrayscale(p=p_gs),
+            K.RandomAutoContrast(p=p_aux),
+        ]
+
+        # Apply up to N transforms per call (bounded by list length)
+        random_apply = max(1, min(1 + 2 * sev, len(transforms)))
+
+        return AugmentationSequential(
+            *transforms,
+            random_apply=random_apply,
+            data_keys=["input"],
+        )
+
+    # Pre-build color augmentation pipeline
+    color_augmentation = _build_color_augmentation(color_aug_severity)
+
     pcds_list = []
     transforms_list = []
     transforms_inv_list = []
@@ -217,104 +280,95 @@ def generate_jittered_batch(
     masks = []
     intrinsics = []
 
+    # Determine jitter mode (default 'euler'), then severity->params
+    mode = jitter_kwargs.get("mode", "euler").lower()
+    force_no_geom = (geometric_aug_severity == 0)
+
     for i in range(batch_size):
         intrinsics.append(moge_output['intrinsics'].detach().clone())
 
-        child_seed = torch.randint(0, 2**63 - 1, (1,),
-                                   device=pcd.device).item()
+        # Per-item RNG (uses master if provided)
+        child_seed = torch.randint(
+            0, 2**63 - 1, (1,),
+            device=pcd.device,
+            generator=gen_master
+        ).item()
         gen_i = torch.Generator(device=pcd.device)
         gen_i.manual_seed(child_seed)
 
+        # Severity-derived defaults; user jitter_kwargs can still override
+        base_geom = _geom_params_from_severity(geometric_aug_severity, mode)
+        if force_no_geom:
+            # Hard override to guarantee NO geometric changes
+            geom_kwargs = {**jitter_kwargs}
+            geom_kwargs.update(dict(trans_range=0.0))
+            if mode == "euler":
+                geom_kwargs.update(dict(roll_deg=(0.0, 0.0),
+                                        pitch_deg=(0.0, 0.0),
+                                        yaw_deg=(0.0, 0.0)))
+            else:
+                geom_kwargs.update(dict(sigma_deg=0.0))
+        else:
+            # Defaults from severity, user-provided values take precedence
+            geom_kwargs = {**base_geom, **jitter_kwargs}
+
         pcd_flatten = pcd.reshape(-1, 3)
-        pcd_out, T, _ = jitter_pcd_pt(pcd_flatten,
-                                      generator=gen_i,
-                                      **jitter_kwargs)
-        # Calculate the inverse transformation
-        # T_inv = [ [R.T, -R.T @ t], [0, 1] ]
+        pcd_out, T, _ = jitter_pcd_pt(
+            pcd_flatten,
+            generator=gen_i,
+            **geom_kwargs
+        )
+
+        # Inverse transform
         R = T[:3, :3]
         t = T[:3, 3]
         R_T = R.T
         t_inv = -torch.matmul(R_T, t)
-        
+
         T_inv = torch.eye(4, dtype=T.dtype, device=T.device)
         T_inv[:3, :3] = R_T
         T_inv[:3, 3] = t_inv
 
-        # assert torch.equal(pcd_out, torch.matmul(pcd_flatten, R.T) + t)
-        # assert torch.allclose(pcd_flatten, torch.matmul(pcd_out - t, R), rtol=0.00005)
-
         pcd_out = pcd_out.reshape(pcd.shape)
-        
+
         pcds_list.append(pcd_out)
         transforms_list.append(T)
         transforms_inv_list.append(T_inv)
 
-    color_augmentation = AugmentationSequential(
-        # Color space augmentations
-        K.ColorJitter(
-            brightness=0.2,     # ±20% brightness change
-            contrast=0.2,       # ±20% contrast change
-            saturation=0.2,     # ±20% saturation change
-            hue=0.1,           # ±10% hue change
-            p=0.8              # 80% probability of applying
-        ),
-        
-        # Gamma correction for exposure-like effects
-        K.RandomGamma(
-            gamma=(0.8, 1.2),   # Gamma range
-            gain=(0.9, 1.1),    # Gain range
-            p=0.5
-        ),
-        
-        # HSV color space augmentations
-        K.RandomHue(hue=(-0.1, 0.1), p=0.4),
-        K.RandomSaturation(saturation=(0.8, 1.2), p=0.4),
-        
-        # Grayscale conversion (with probability)
-        K.RandomGrayscale(p=0.1),
-        
-        # Posterization effect
-        # K.RandomPosterize(bits=4, p=0.2),
-        
-        # Solarization effect
-        # K.RandomSolarize(thresholds=0.1, additions=0.1, p=0.2),
-        
-        # Auto contrast
-        K.RandomAutoContrast(p=0.3),
-        
-        # Random ordering and application
-        random_apply=5,  # Randomly apply up to 10 transforms
-        data_keys=["input"],  # Apply to input tensor
-    )
+        # ---- Color augmentation
+        if color_augmentation is None:
+            image_aug = image  # no-op at severity 0
+        else:
+            image_aug = color_augmentation(image)[0]
 
-    for i in range(batch_size):
-        pcd_out_i = pcds_list[i].reshape(point_map.shape) # Reshape for masking
-        # pcd_out_masked = pcd_out[mask]
-        pcd_out_masked = pcd_out_i[mask]
+        # Open3D render
+        if geometric_aug_severity == 0:
+            rendered_image = image_aug
+            bg_mask = mask.clone()
+        else:
+            # Colors for visible (masked) points
+            pcd_out_i = pcds_list[i].reshape(point_map.shape)
+            pcd_out_masked = pcd_out_i[mask]
+            colors_masked = image_aug[:, mask].T
+            pcd_open3d = o3d.geometry.PointCloud()
+            pcd_open3d.points = o3d.utility.Vector3dVector(pcd_out_masked.cpu().numpy())
+            pcd_open3d.colors = o3d.utility.Vector3dVector(colors_masked.cpu().numpy())
 
-        image_aug = color_augmentation(image)[0]
-        colors_masked = image_aug[:, mask].T
-
-        pcd_open3d = o3d.geometry.PointCloud()
-        pcd_open3d.points = o3d.utility.Vector3dVector(pcd_out_masked.cpu().numpy())
-        pcd_open3d.colors = o3d.utility.Vector3dVector(colors_masked.cpu().numpy())
-
-        rendered_image, _, bg_mask = render_pcd_to_numpy_open3d(
-            pcd_open3d,
-            width=width, height=height,
-            fx=fx, fy=fy, cx=cx, cy=cy,
-            return_depth=True, return_mask=True,
-            bg_color=(255, 255, 255)
-        )
-
-        images.append(torch.from_numpy(rendered_image).float().permute(2, 0, 1) / 255.0)
+            rendered_image, _, bg_mask = render_pcd_to_numpy_open3d(
+                pcd_open3d,
+                width=width, height=height,
+                fx=fx, fy=fy, cx=cx, cy=cy,
+                return_depth=True, return_mask=True,
+                bg_color=(255, 255, 255)
+            )
+            rendered_image = torch.from_numpy(rendered_image).float().permute(2, 0, 1) / 255.0
+        images.append(rendered_image)
         masks.append(torch.tensor(~bg_mask))
 
+        # Optional debug dumps (kept from original)
         import cv2
-        image_to_save = (image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
-        cv2.imwrite(f"{i}.png", cv2.cvtColor(rendered_image, cv2.COLOR_RGB2BGR))
-        cv2.imwrite("image.png", cv2.cvtColor(image_to_save, cv2.COLOR_RGB2BGR))
-
+        image_to_save = (rendered_image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+        cv2.imwrite(f"{i}.png", cv2.cvtColor(image_to_save, cv2.COLOR_RGB2BGR))
 
     return {
         "images": torch.stack(images).to(pcd.device),

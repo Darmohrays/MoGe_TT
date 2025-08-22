@@ -138,7 +138,7 @@ class Baseline(MGEBaselineInterface):
             optimizer.zero_grad()
             
             # Generate a batch of jittered/augmented views from the single input image
-            batch = generate_jittered_batch(image, output, 2)
+            batch = generate_jittered_batch(image, output, 2, **config['augs'])
 
             # Use autocast for mixed-precision forward pass
             with torch.amp.autocast(enabled=self.use_fp16, device_type="cuda"):

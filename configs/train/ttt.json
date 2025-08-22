@@ -9,11 +9,12 @@
     "batch_size": 2,
     "optim": {
         "name": "SGD",
-        "lr": 1e-4,
+        "lr": 1e-5,
         "weight_decay": 1e4
     },
     "augs":
     {
-        
+        "geometric_aug_severity": 0,
+        "color_aug_severity": 5
     }
 }
