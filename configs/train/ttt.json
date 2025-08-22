@@ -3,5 +3,17 @@
         "global": {"function": "affine_invariant_global_loss", "weight": 1.0, "params": {"align_resolution": 32}},
         "patch_4": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 4, "align_resolution": 16, "num_patches": 16}},
         "mask": {"function": "mask_l2_loss", "weight": 1.0}
+    },
+    "num_ttt_steps": 50,
+    "grad_accum_steps": 8,
+    "batch_size": 2,
+    "optim": {
+        "name": "SGD",
+        "lr": 1e-4,
+        "weight_decay": 1e4
+    },
+    "augs":
+    {
+        
     }
 }

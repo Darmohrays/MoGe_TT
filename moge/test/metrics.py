@@ -254,8 +254,8 @@ def compute_metrics(
             'delta1': delta1_point(pred_points[mask], gt_points[mask])
         }
 
-        if vis and pred_points_aligned is None:
-            pred_points_aligned = pred['points_scale_invariant'] * scale
+        # if vis and pred_points_aligned is None:
+        #     pred_points_aligned = pred['points_scale_invariant'] * scale
     
     # Affine-invariant points
     if 'points_affine_invariant' in pred:
@@ -279,8 +279,8 @@ def compute_metrics(
             'delta1': delta1_point(pred_points[mask], gt_points[mask])
         }
 
-        if vis and pred_points_aligned is None:
-            pred_points_aligned = pred['points_affine_invariant'] * scale + shift
+        # if vis and pred_points_aligned is None:
+            # pred_points_aligned = pred['points_affine_invariant'] * scale + shift
 
     # Local points
     if 'segmentation_mask' in gt and 'points' in gt and any('points' in k for k in pred.keys()):

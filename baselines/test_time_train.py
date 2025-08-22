@@ -104,7 +104,6 @@ class Baseline(MGEBaselineInterface):
         return output
 
     def infer_for_evaluation(self, image: torch.FloatTensor, intrinsics: torch.FloatTensor = None):
-
         if intrinsics is not None:
             fov_x, _ = utils3d.torch.intrinsics_to_fov(intrinsics)
             fov_x = torch.rad2deg(fov_x)
@@ -124,21 +123,22 @@ class Baseline(MGEBaselineInterface):
         ttt_model.train()
 
         with open("configs/train/ttt.json") as f:
-            loss_config = json.load(f)
+            config = json.load(f)
         # ------------------- START: Test-Time Training Loop ------------------- #
         
         # Setup optimizer to update only the trainable parameters (unfrozen layers)
+        optimizer_config = config['optim']
         optimizer = torch.optim.SGD(
             [p for p in ttt_model.parameters() if p.requires_grad],
-            lr=1e-5,
-            weight_decay=1e-4
+            lr=optimizer_config["lr"],
+            weight_decay=optimizer_config["weight_decay"]
         )
         
         # Setup mixed-precision training scaler
         scaler = torch.amp.GradScaler(enabled=self.use_fp16)
         
-        num_ttt_steps = 50
-        grad_accum_steps = 8
+        num_ttt_steps = config["num_ttt_steps"]
+        grad_accum_steps = config["grad_accum_steps"]
 
         for step in range(num_ttt_steps):
             optimizer.zero_grad()
@@ -156,7 +156,7 @@ class Baseline(MGEBaselineInterface):
                 
                 # Compute the self-supervised loss (total, across the batch)
                 losses = compute_moge2_ttt_loss(data, use_transforms_inv=True,
-                                                config=loss_config, device='cuda')
+                                                config=config, device='cuda')
                 loss = losses['loss']
 
                 print('---------------------')

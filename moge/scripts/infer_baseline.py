@@ -88,12 +88,12 @@ def main(ctx: click.Context, baseline_code_path: str, input_path: str, output_pa
             for k in ['points_metric', 'points_scale_invariant', 'points_affine_invariant']:
                 if k in output:
                     points = output[k].cpu().numpy()
-                    cv2.imwrite(str(save_path / f'{k}.exr'), cv2.cvtColor(points, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+                    np.save(str(save_path / f'{k}.npy'), points)
 
             for k in ['depth_metric', 'depth_scale_invariant', 'depth_affine_invariant', 'disparity_affine_invariant']:
                 if k in output:
                     depth = output[k].cpu().numpy()
-                    cv2.imwrite(str(save_path / f'{k}.exr'), depth, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+                    np.save(str(save_path / f'{k}.npy'), depth)
                     if k in ['depth_metric', 'depth_scale_invariant']:
                         depth_vis = colorize_depth(depth)
                     elif k == 'depth_affine_invariant':

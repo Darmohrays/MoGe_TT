@@ -87,7 +87,7 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
 
                     if 'pred_points' in misc:
                         points = misc['pred_points'].cpu().numpy()
-                        cv2.imwrite(str(dump_path / 'pred' / 'points.exr'), cv2.cvtColor(points.astype(np.float32), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+                        np.save(str(dump_path / 'pred' / 'points.npy'), points)
 
                     if 'pred_depth' in misc:
                         depth = misc['pred_depth'].cpu().numpy()
@@ -120,7 +120,7 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
 
                     if 'points' in sample:
                         points = sample['points']
-                        cv2.imwrite(str(dump_path / 'gt' / 'points.exr'), cv2.cvtColor(points.cpu().numpy().astype(np.float32), cv2.COLOR_RGB2BGR), [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+                        np.save(str(dump_path / 'gt' / 'points.npy'), points.cpu().numpy())
 
                     if 'depth' in sample:
                         depth = sample['depth']

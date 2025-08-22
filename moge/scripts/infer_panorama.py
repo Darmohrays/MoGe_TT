@@ -128,8 +128,8 @@ def main(
         if save_maps_:
             cv2.imwrite(str(save_path / 'image.jpg'), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
             cv2.imwrite(str(save_path / 'depth_vis.png'), cv2.cvtColor(colorize_depth(panorama_depth, mask=panorama_mask), cv2.COLOR_RGB2BGR))
-            cv2.imwrite(str(save_path / 'depth.exr'), panorama_depth, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
-            cv2.imwrite(str(save_path / 'points.exr'), points, [cv2.IMWRITE_EXR_TYPE, cv2.IMWRITE_EXR_TYPE_FLOAT])
+            np.save(str(save_path / 'depth.npy'), panorama_depth)
+            np.save(str(save_path / 'points.npy'), points)
             cv2.imwrite(str(save_path /'mask.png'), (panorama_mask * 255).astype(np.uint8))
 
         # Export mesh & visulization
