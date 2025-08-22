@@ -1,11 +1,16 @@
 from typing import Tuple, Union, Optional, Dict
 
+
+
+
 import torch
-import open3d as o3d
 import kornia.augmentation as K
 from kornia.augmentation import AugmentationSequential
 
+
+# Configure for GPU usage - more comprehensive setup
 from .render import render_pcd_to_numpy_open3d
+import open3d as o3d
 
 
 def _rodrigues_pt(omega: torch.Tensor) -> torch.Tensor:
@@ -176,7 +181,6 @@ def generate_jittered_batch(
     image: torch.Tensor,
     moge_output: Dict[str, torch.Tensor],
     batch_size: int,
-    random_state: Optional[int] = None,
     **jitter_kwargs
 ) -> dict:
     """
@@ -294,7 +298,6 @@ def generate_jittered_batch(
         pcd_open3d = o3d.geometry.PointCloud()
         pcd_open3d.points = o3d.utility.Vector3dVector(pcd_out_masked.cpu().numpy())
         pcd_open3d.colors = o3d.utility.Vector3dVector(colors_masked.cpu().numpy())
-        print(pcd_open3d)
 
         rendered_image, _, bg_mask = render_pcd_to_numpy_open3d(
             pcd_open3d,

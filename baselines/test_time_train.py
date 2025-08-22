@@ -3,7 +3,6 @@ import json
 import sys
 from typing import *
 import importlib
-import logging  # >>> TTT LOGGING
 
 import click
 import torch
@@ -31,16 +30,6 @@ class Baseline(MGEBaselineInterface):
         self.resolution_level = resolution_level
         self.use_fp16 = False
 
-        # >>> TTT LOGGING
-        self._logger = logging.getLogger("moge.ttt")
-        if not self._logger.handlers:
-            handler = logging.StreamHandler(sys.stdout)
-            handler.setFormatter(logging.Formatter("[%(asctime)s][%(levelname)s] %(message)s", datefmt="%H:%M:%S"))
-            self._logger.addHandler(handler)
-            self._logger.setLevel(logging.INFO)
-        self._ttt_logs: List[Dict[str, Any]] = []
-        # <<< TTT LOGGING
-    
     @click.command()
     @click.option('--num_tokens', type=int, default=None)
     @click.option('--resolution_level', type=int, default=9)
@@ -103,7 +92,10 @@ class Baseline(MGEBaselineInterface):
 
         return output
 
-    def infer_for_evaluation(self, image: torch.FloatTensor, intrinsics: torch.FloatTensor = None):
+    def infer_for_evaluation(self, image: torch.FloatTensor,
+                             config: dict,
+                             intrinsics: torch.FloatTensor = None,
+                             ):
         if intrinsics is not None:
             fov_x, _ = utils3d.torch.intrinsics_to_fov(intrinsics)
             fov_x = torch.rad2deg(fov_x)
@@ -122,8 +114,8 @@ class Baseline(MGEBaselineInterface):
             ttt_model.encoder.requires_grad_(False)
         ttt_model.train()
 
-        with open("configs/train/ttt.json") as f:
-            config = json.load(f)
+        # with open("configs/train/ttt.json") as f:
+        #     config = json.load(f)
         # ------------------- START: Test-Time Training Loop ------------------- #
         
         # Setup optimizer to update only the trainable parameters (unfrozen layers)
@@ -139,6 +131,8 @@ class Baseline(MGEBaselineInterface):
         
         num_ttt_steps = config["num_ttt_steps"]
         grad_accum_steps = config["grad_accum_steps"]
+
+        losses_logs = list()
 
         for step in range(num_ttt_steps):
             optimizer.zero_grad()
@@ -158,6 +152,7 @@ class Baseline(MGEBaselineInterface):
                 losses = compute_moge2_ttt_loss(data, use_transforms_inv=True,
                                                 config=config, device='cuda')
                 loss = losses['loss']
+                losses_logs.append({loss_name: loss_value.item() for loss_name, loss_value in losses.items()})
 
                 print('---------------------')
                 print(loss)
@@ -182,10 +177,12 @@ class Baseline(MGEBaselineInterface):
                 'points_scale_invariant': output_ttt['points'],
                 'depth_scale_invariant': output_ttt['depth'],
                 'intrinsics': output_ttt['intrinsics'],
+                "losses_logs": losses_logs,
             }
         else:
             return {
                 'points_metric': output_ttt['points'],
                 'depth_metric': output_ttt['depth'],
                 'intrinsics': output_ttt['intrinsics'],
+                "losses_logs": losses_logs
             }

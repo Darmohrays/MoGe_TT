@@ -7,16 +7,6 @@ import open3d as o3d
 from open3d.camera import PinholeCameraIntrinsic
 from open3d.visualization.rendering import OffscreenRenderer, MaterialRecord
 
-# Configure for GPU usage - more comprehensive setup
-os.environ['OPEN3D_USE_GPU'] = '1'
-os.environ['EGL_PLATFORM'] = 'device'
-os.environ['MESA_GL_VERSION_OVERRIDE'] = '4.5'
-os.environ['MESA_GLSL_VERSION_OVERRIDE'] = '450'
-os.environ['LIBGL_ALWAYS_INDIRECT'] = '0'
-os.environ['LIBGL_ALWAYS_SOFTWARE'] = '0'
-os.environ['GALLIUM_DRIVER'] = 'llvmpipe'  # Remove this line if you have dedicated GPU
-os.environ['OPEN3D_VERBOSITY_LEVEL'] = '0'
-
 # Suppress verbose output
 o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
 

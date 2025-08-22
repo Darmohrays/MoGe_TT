@@ -1,4 +1,16 @@
 import os
+os.environ['OPEN3D_USE_GPU'] = '1'
+os.environ['EGL_PLATFORM'] = 'device'
+os.environ['MESA_GL_VERSION_OVERRIDE'] = '4.5'
+os.environ['MESA_GLSL_VERSION_OVERRIDE'] = '450'
+os.environ['LIBGL_ALWAYS_INDIRECT'] = '0'
+os.environ['LIBGL_ALWAYS_SOFTWARE'] = '0'
+os.environ['GALLIUM_DRIVER'] = 'llvmpipe'  # Remove this line if you have dedicated GPU
+os.environ['OPEN3D_VERBOSITY_LEVEL'] = '3'
+os.environ['FILAMENT_ENABLE_FEATURE_LEVEL_0'] = '0'
+os.environ['GLOG_minloglevel'] = '3'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
 import sys
 from pathlib import Path
 if (_package_root := str(Path(__file__).absolute().parents[2])) not in sys.path:
@@ -19,8 +31,11 @@ import click
 @click.option('--oracle', 'oracle_mode', is_flag=True, help='Use oracle mode for evaluation, i.e., use the GT intrinsics input.')
 @click.option('--dump_pred', is_flag=True, help='Dump predition results.')
 @click.option('--dump_gt', is_flag=True, help='Dump ground truth.')
+@click.option('--ttt-config', type=click.Path(), required=False)
 @click.pass_context
-def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_mode: bool, output_path: Union[str, Path], dump_pred: bool, dump_gt: bool):
+def main(ctx: click.Context, baseline_code_path: str, config_path: str,
+         oracle_mode: bool, output_path: Union[str, Path],
+         dump_pred: bool, dump_gt: bool, ttt_config: str):
     # Lazy import
     import  cv2
     import numpy as np
@@ -39,6 +54,7 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
     # Load the baseline model
     module = import_file_as_module(baseline_code_path, Path(baseline_code_path).stem)
     baseline_cls: Type[MGEBaselineInterface] = getattr(module, 'Baseline')
+
     baseline : MGEBaselineInterface = baseline_cls.load.main(ctx.args, standalone_mode=False)
 
     # Load the evaluation configurations
@@ -47,6 +63,13 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
     
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     all_metrics = {}
+    if ttt_config is not None:
+        with open(ttt_config, 'r') as f:
+            ttt_config = json.load(f)
+        
+        with open(Path(output_path).parent / "ttt_config.json", 'w') as f:
+            json.dump(ttt_config, f, indent=2)
+
     # Iterate over the dataset
     for benchmark_name, benchmark_config in tqdm(list(config.items()), desc='Benchmarks'):
         filenames, metrics_list = [], []
@@ -66,9 +89,15 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
                 with timeit('_inference_timer', verbose=False) as timer:
                     # with torch.inference_mode():
                     if oracle_mode:
-                        pred = baseline.infer_for_evaluation(image, gt_intrinsics)
+                        if ttt_config is None:
+                            pred = baseline.infer_for_evaluation(image, gt_intrinsics)
+                        else:
+                            pred = baseline.infer_for_evaluation(image, ttt_config, gt_intrinsics)
                     else:
-                        pred = baseline.infer_for_evaluation(image)
+                        if ttt_config is None:
+                            pred = baseline.infer_for_evaluation(image)
+                        else:
+                            pred = baseline.infer_for_evaluation(image, ttt_config)
                     torch.cuda.synchronize()
 
                 # Compute metrics
@@ -113,6 +142,11 @@ def main(ctx: click.Context, baseline_code_path: str, config_path: str, oracle_m
                                 'fov_y': np.rad2deg(fov_y.item()),
                                 'intrinsics': intrinsics.cpu().numpy().tolist(),
                             }, f)
+
+                    if "losses_logs" in pred:
+                        import pandas as pd
+                        lossses_df = pd.DataFrame(pred['losses_logs'])
+                        lossses_df.to_csv(dump_path / 'pred' / "losses_logs.csv")
                 
                 if dump_gt:
                     dump_path.joinpath('gt').mkdir(parents=True, exist_ok=True)
