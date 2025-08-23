@@ -89,7 +89,10 @@ class Baseline(MGEBaselineInterface):
             if "mask" in output:
                 output["mask"] = output["mask"] > 0.5
                 output["mask"] &= output["points"][..., 2] > 0
+        
+        output['points'] = output['points'] * output['metric_scale']
 
+        # import ipdb; ipdb.set_trace()
         return output
 
     def infer_for_evaluation(self, image: torch.FloatTensor,
@@ -114,8 +117,6 @@ class Baseline(MGEBaselineInterface):
             ttt_model.encoder.requires_grad_(False)
         ttt_model.train()
 
-        # with open("configs/train/ttt.json") as f:
-        #     config = json.load(f)
         # ------------------- START: Test-Time Training Loop ------------------- #
         
         # Setup optimizer to update only the trainable parameters (unfrozen layers)
@@ -138,19 +139,25 @@ class Baseline(MGEBaselineInterface):
             optimizer.zero_grad()
             
             # Generate a batch of jittered/augmented views from the single input image
-            batch = generate_jittered_batch(image, output, 2, **config['augs'])
+            batch = generate_jittered_batch(image, output, config['batch_size'],
+                                            **config['augs'])
 
             # Use autocast for mixed-precision forward pass
             with torch.amp.autocast(enabled=self.use_fp16, device_type="cuda"):
                 # Forward pass through the model being adapted
                 ttt_output = ttt_model(batch['images'], num_tokens=self.num_tokens)
                 
+                ttt_output["points"] = ttt_output["points"] * ttt_output["metric_scale"][:, None, None, None]
+
                 # Combine original data and model output for loss calculation
                 data = batch | ttt_output
                 
                 # Compute the self-supervised loss (total, across the batch)
-                losses = compute_moge2_ttt_loss(data, use_transforms_inv=True,
-                                                config=config, device='cuda')
+                # losses = compute_moge2_ttt_loss(data, use_transforms_inv=True,
+                #                                 config=config, device='cuda')
+
+                losses = compute_moge2_ttt_loss_from_orig(data, config,
+                                                          device='cuda', use_transforms_inv=True)
                 loss = losses['loss']
                 losses_logs.append({loss_name: loss_value.item() for loss_name, loss_value in losses.items()})
 
@@ -169,7 +176,8 @@ class Baseline(MGEBaselineInterface):
         
         # -------------------- END: Test-Time Training Loop -------------------- #
         with torch.inference_mode():
-            output_ttt = ttt_model.infer(image, fov_x=fov_x, apply_mask=False, num_tokens=self.num_tokens, use_fp16=self.use_fp16)
+            output_ttt = ttt_model.infer(image, fov_x=fov_x, apply_mask=False,
+                                         num_tokens=self.num_tokens, use_fp16=self.use_fp16)
 
 
         if self.version == 'v1':

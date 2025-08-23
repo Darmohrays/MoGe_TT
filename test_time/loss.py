@@ -99,9 +99,12 @@ def compute_moge2_ttt_loss(
     *,
     use_transforms_inv: bool = False,
     # weights
-    w_geom: float = 1.0,
+    w_geom: float = 0.1,
     w_smooth: float = 0.05,
     w_normal: float = 0.1,
+    # w_geom: float = 1.0,
+    # w_smooth: float = 0.0,
+    # w_normal: float = 0.,
     gamma_edge: float = 10.0,
     eps: float = 1e-6,
     **kwargs
@@ -125,15 +128,20 @@ def compute_moge2_ttt_loss(
     """
     images: torch.Tensor        = batch["images"]
     masks_gt: torch.Tensor      = batch["masks_gt"]          # bool
-    points_gt: torch.Tensor= batch["points_gt"]         # (B,H*W,3)
+    points_gt: torch.Tensor = batch["points_gt"]         # (B,H*W,3)
     T: torch.Tensor             = batch["transforms_inv"] if use_transforms_inv else batch["transforms"]
     points_student: torch.Tensor= batch["points"]            # (B,H,W,3)
     mask_student: torch.Tensor  = batch["mask"]              # (B,H,W)
 
+    # R = T[0, :3, :3]
+    # t = T[0, :3, 3]
+
+    test_idx = 0
     B, C, H, W = images.shape
 
     # Transform teacher (source) points into the *target* camera frame
-    points_gt_in_target = _apply_transform(points_gt, T)     # (B,H,W,3)
+    # points_gt_in_target = _apply_transform(points_gt, T)     # (B,H,W,3)
+    points_gt_in_target = points_gt
 
     # Validity mask: teacher-visible AND student-valid AND finite AND positive depth
     finite_gt   = torch.isfinite(points_gt_in_target).all(dim=-1)
@@ -154,6 +162,13 @@ def compute_moge2_ttt_loss(
     geom_residual = torch.abs(points_student - points_gt_in_target).sum(dim=-1)   # (B,H,W)
     geom_loss = (geom_residual * valid_f).sum() / num_valid
 
+    # import numpy as np
+    # np.save("points_student.npy", points_student[test_idx].detach().cpu().numpy())
+    # np.save("points_gt_in_target.npy", points_gt_in_target[test_idx].detach().cpu().numpy())
+    # np.save("valid.npy", valid[test_idx].detach().cpu().numpy())
+    # np.save("image.npy", images[0].permute(1, 2, 0).detach().cpu().numpy())
+
+    # import ipdb; ipdb.set_trace()
     # ---------------------------
     # 2) Edge-aware smoothness on student depth
     # ---------------------------
@@ -197,7 +212,7 @@ def compute_moge2_ttt_loss_from_orig(batch: dict, config: dict, device: str,
     pred_points, pred_mask, pred_metric_scale = batch['points'], batch['mask'], batch.get('metric_scale', None)
 
     # gt_points = utils3d.torch.depth_to_points(gt_depth, intrinsics=gt_intrinsics)
-    gt_points = _apply_transform(gt_points, T)
+    # gt_points = _apply_transform(gt_points, T)
     gt_focal = 1 / (1 / gt_intrinsics[..., 0, 0] ** 2 + 1 / gt_intrinsics[..., 1, 1] ** 2) ** 0.5
     
     loss_list = []

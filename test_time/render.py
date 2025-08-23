@@ -22,93 +22,108 @@ def render_pcd_to_numpy_open3d(
     point_size: float = 2.0,
     shader: str = "defaultUnlit",
     bg_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
-    return_depth: bool = False,
-    return_mask: bool = False,
     use_gpu: bool = True,
 ):
     """
-    Render a point cloud with Open3D's OffscreenRenderer using GPU acceleration.
-    
+    Render a point cloud and return the color image, point cloud representation,
+    and background mask.
+
     Args:
-        use_gpu: Whether to attempt GPU acceleration
-        
+        pcd: The Open3D PointCloud object to render.
+        width: The width of the rendered image.
+        height: The height of the rendered image.
+        fx: The focal length along the x-axis. Defaults to max(width, height).
+        fy: The focal length along the y-axis. Defaults to max(width, height).
+        cx: The principal point x-coordinate. Defaults to width / 2.0.
+        cy: The principal point y-coordinate. Defaults to height / 2.0.
+        extrinsic: The 4x4 extrinsic camera matrix (world to camera). Defaults to identity.
+        point_size: The size of the points to be rendered.
+        shader: The shader to use for rendering.
+        bg_color: The RGB background color as a tuple of floats in [0, 1].
+        use_gpu: Whether to attempt GPU acceleration.
+
     Returns:
-        img_np: (H,W,3) uint8 RGB image.
-        depth_np: (H,W) float depth image in [0,1] (optional).
-        mask_np: (H,W) bool, True where no geometry was hit (optional).
+        A tuple containing:
+        - rendered_image (np.ndarray): (H, W, 3) uint8 RGB image.
+        - rendered_pcd (np.ndarray): (H, W, 3) float32 array representing the point cloud.
+                                     Background pixels are (0, 0, 0).
+        - bg_mask (np.ndarray): (H, W) bool array, True for background pixels.
     """
+    # Suppress verbose logging from Open3D
     o3d.utility.set_verbosity_level(o3d.utility.VerbosityLevel.Error)
     logging.getLogger('open3d').setLevel(logging.ERROR)
-    # Suppress all warnings from Open3D
     warnings.filterwarnings('ignore', module='open3d')
 
-    # ---- intrinsics defaults
+    # ---- Set up camera intrinsics ----
     if fx is None or fy is None:
         fx = fy = max(width, height)
     if cx is None or cy is None:
         cx, cy = width / 2.0, height / 2.0
     intrinsic = PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
-    
+
+    # ---- Set up camera extrinsics ----
     if extrinsic is None:
         extrinsic = np.eye(4, dtype=np.float32)
-    
-    # ---- create renderer with GPU settings
+
+    # ---- Create and configure the renderer ----
     renderer = OffscreenRenderer(width, height)
     
     try:
-        # Check if GPU is being used
         if use_gpu:
-            # These settings can help force GPU usage
+            # GPU-specific settings for performance
             renderer.scene.scene.enable_sun_light(False)
             renderer.scene.scene.enable_indirect_light(True)
-        
-        # Background as RGBA (floats 0..1)
+
+        # Set background color
         renderer.scene.set_background(
             np.array([bg_color[0], bg_color[1], bg_color[2], 1.0], dtype=np.float32)
         )
-        
-        # Material (point size matters for point clouds)
+
+        # Set up material properties
         mat = MaterialRecord()
         mat.shader = shader
         mat.point_size = float(point_size)
-        
-        # Optimize material for GPU rendering
-        if use_gpu and hasattr(mat, 'albedo_img'):
-            # Enable GPU-specific optimizations if available
-            mat.base_roughness = 0.9
-            mat.base_reflectance = 0.04
-        
-        # (re)build scene
+
+        # Add geometry to the scene
         renderer.scene.clear_geometry()
         renderer.scene.add_geometry("pcd", pcd, mat)
-        
-        # Camera
+
+        # Set up the camera
         renderer.setup_camera(intrinsic, extrinsic)
-        
-        # Render color
+
+        # ---- Render color image ----
         img_o3d = renderer.render_to_image()
-        img_np = np.asarray(img_o3d)  # uint8 HxWx3 (RGB)
-        
-        out = [img_np]
-        
-        if return_depth or return_mask:
-            depth_o3d = renderer.render_to_depth_image()
-            depth_np = np.asarray(depth_o3d).astype(np.float32)  # normalized depth in [0,1]
-            
-            if return_depth:
-                out.append(depth_np)
-                
-            if return_mask:
-                # Pixels that didn't hit geometry typically come back at the far plane (≈1.0)
-                mask_np = np.isclose(depth_np, 1.0, atol=1e-6) | ~np.isfinite(depth_np)
-                out.append(mask_np)
-        
-        if len(out) == 1:
-            return out[0]
-        return tuple(out)
-        
+        rendered_image = np.asarray(img_o3d)
+
+        # ---- Render depth image to get Z coordinates ----
+        depth_o3d = renderer.render_to_depth_image(z_in_view_space=True)
+        depth_np = np.asarray(depth_o3d)
+
+        # ---- Create background mask ----
+        bg_mask = np.isinf(depth_np)
+
+        # ---- Unproject depth image to 3D point cloud ----
+        v, u = np.indices((height, width))
+        Z = depth_np
+        X = (u - cx) * Z / fx
+        Y = (v - cy) * Z / fy
+
+        points_camera_space = np.stack([X, Y, Z], axis=-1)
+        points_camera_space[bg_mask] = 0.0
+
+        # ---- Transform points from camera space to world space ----
+        points_h = np.concatenate(
+            [points_camera_space, np.ones((height, width, 1))], axis=-1
+        )
+        inv_extrinsic = np.linalg.inv(extrinsic)
+        points_flat = points_h.reshape(-1, 4).T
+        points_world_flat = inv_extrinsic @ points_flat
+        rendered_pcd = points_world_flat.T.reshape(height, width, 4)[..., :3]
+
+        return rendered_image, rendered_pcd.astype(np.float32), bg_mask
+
     finally:
-        # Ensure GL resources get freed promptly
+        # Clean up renderer resources
         del renderer
 
 def check_gpu_availability():

@@ -1,8 +1,5 @@
 from typing import Tuple, Union, Optional, Dict
 
-
-
-
 import torch
 import kornia.augmentation as K
 from kornia.augmentation import AugmentationSequential
@@ -177,58 +174,35 @@ def jitter_pcd_pt(
     return pcd_out, T, info
 
 
-def generate_jittered_batch(
-    image: torch.Tensor,
-    moge_output: Dict[str, torch.Tensor],
-    batch_size: int,
-    random_state: Optional[int] = None,
-    geometric_aug_severity: int = 3,
-    color_aug_severity: int = 3,
-    **jitter_kwargs
-) -> dict:
-    """
-    Generates a batch of jittered point clouds and rendered images from a single source.
-    """
-    # ---- Validate severities
-    if not (isinstance(geometric_aug_severity, int) and 0 <= geometric_aug_severity <= 5):
-        raise ValueError("geometric_aug_severity must be an int in [0, 5].")
-    if not (isinstance(color_aug_severity, int) and 0 <= color_aug_severity <= 5):
-        raise ValueError("color_aug_severity must be an int in [0, 5].")
+def _geom_params_from_severity(sev: int, mode: str) -> dict:
+    """Return default jitter params for given severity and mode."""
+    # Max Euler yaw/pitch/roll magnitude (degrees)
+    rot_max_deg = [0.0, 0.5, 1.0, 3.0, 7.5, 15.0][sev]
+    
+    # Translation range for x, y axes (pan/tilt)
+    trans_max_xy = [0.0, 0.005, 0.01, 0.02, 0.05, 0.10][sev]
+    
+    # Translation range for z-axis (zoom), set to be larger than x/y
+    trans_max_z = [0.0, 0.01, 0.025, 0.05, 0.1, 0.20][sev]
 
-    point_map = moge_output['points']
-    mask = moge_output['mask']
+    # Construct the per-axis translation range tuple for _sample_translation_pt
+    trans_range = (
+        (-trans_max_xy, trans_max_xy),  # (xmin, xmax)
+        (-trans_max_xy, trans_max_xy),  # (ymin, ymax)
+        (-trans_max_z*6, 0)     # (zmin, zmax)
+    )
 
-    height, width = image.shape[1:]
-    fx = moge_output['intrinsics'][0, 0].item() * width
-    fy = moge_output['intrinsics'][1, 1].item() * height
-    cx = moge_output['intrinsics'][0, 2].item() * width
-    cy = moge_output['intrinsics'][1, 2].item() * height
+    params = {"trans_range": trans_range}
+    if mode == "euler":
+        r = (-rot_max_deg, rot_max_deg)
+        params.update(dict(roll_deg=r, pitch_deg=r, yaw_deg=r))
+    else:  # axis_angle
+        params.update(dict(sigma_deg=rot_max_deg))
+        
+    return params
+    
 
-    pcd = point_map
-
-    # Optional master RNG for reproducibility
-    gen_master = None
-    if random_state is not None:
-        gen_master = torch.Generator(device=pcd.device)
-        gen_master.manual_seed(int(random_state))
-
-    # ---- Helpers to map severity -> params
-    def _geom_params_from_severity(sev: int, mode: str) -> dict:
-        """Return default jitter params for given severity and mode."""
-        # Max Euler yaw/pitch/roll magnitude (degrees)
-        rot_max_deg = [0.0, 0.5, 1.0, 3.0, 7.5, 15.0][sev]
-        # Translation uniform per-axis range (meters, or scene units)
-        trans_max = [0.0, 0.005, 0.01, 0.02, 0.05, 0.10][sev]
-
-        params = {"trans_range": trans_max}
-        if mode == "euler":
-            r = (-rot_max_deg, rot_max_deg)
-            params.update(dict(roll_deg=r, pitch_deg=r, yaw_deg=r))
-        else:  # axis_angle
-            params.update(dict(sigma_deg=rot_max_deg))
-        return params
-
-    def _build_color_augmentation(sev: int):
+def _build_color_augmentation(sev: int):
         if sev == 0:
             return None  # handled downstream (no-op)
 
@@ -269,6 +243,42 @@ def generate_jittered_batch(
             random_apply=random_apply,
             data_keys=["input"],
         )
+
+
+def generate_jittered_batch(
+    image: torch.Tensor,
+    moge_output: Dict[str, torch.Tensor],
+    batch_size: int,
+    random_state: Optional[int] = None,
+    geometric_aug_severity: int = 3,
+    color_aug_severity: int = 3,
+    **jitter_kwargs
+) -> dict:
+    """
+    Generates a batch of jittered point clouds and rendered images from a single source.
+    """
+    # ---- Validate severities
+    if not (isinstance(geometric_aug_severity, int) and 0 <= geometric_aug_severity <= 5):
+        raise ValueError("geometric_aug_severity must be an int in [0, 5].")
+    if not (isinstance(color_aug_severity, int) and 0 <= color_aug_severity <= 5):
+        raise ValueError("color_aug_severity must be an int in [0, 5].")
+
+    point_map = moge_output['points']
+    mask = moge_output['mask']
+
+    height, width = image.shape[1:]
+    fx = moge_output['intrinsics'][0, 0].item() * width
+    fy = moge_output['intrinsics'][1, 1].item() * height
+    cx = moge_output['intrinsics'][0, 2].item() * width
+    cy = moge_output['intrinsics'][1, 2].item() * height
+
+    pcd = point_map
+
+    # Optional master RNG for reproducibility
+    gen_master = None
+    if random_state is not None:
+        gen_master = torch.Generator(device=pcd.device)
+        gen_master.manual_seed(int(random_state))
 
     # Pre-build color augmentation pipeline
     color_augmentation = _build_color_augmentation(color_aug_severity)
@@ -329,9 +339,12 @@ def generate_jittered_batch(
         T_inv[:3, :3] = R_T
         T_inv[:3, 3] = t_inv
 
+        assert torch.equal(pcd_out, torch.matmul(pcd_flatten, R.T) + t)
+        assert torch.allclose(pcd_flatten, torch.matmul(pcd_out - t, R), atol=0.00005)
+
         pcd_out = pcd_out.reshape(pcd.shape)
 
-        pcds_list.append(pcd_out)
+        # pcds_list.append(pcd_out)
         transforms_list.append(T)
         transforms_inv_list.append(T_inv)
 
@@ -344,31 +357,38 @@ def generate_jittered_batch(
         # Open3D render
         if geometric_aug_severity == 0:
             rendered_image = image_aug
-            bg_mask = mask.clone()
+            bg_mask = mask.detach().clone()
         else:
             # Colors for visible (masked) points
-            pcd_out_i = pcds_list[i].reshape(point_map.shape)
+            pcd_out_i = pcd_out
             pcd_out_masked = pcd_out_i[mask]
             colors_masked = image_aug[:, mask].T
             pcd_open3d = o3d.geometry.PointCloud()
             pcd_open3d.points = o3d.utility.Vector3dVector(pcd_out_masked.cpu().numpy())
             pcd_open3d.colors = o3d.utility.Vector3dVector(colors_masked.cpu().numpy())
 
-            rendered_image, _, bg_mask = render_pcd_to_numpy_open3d(
+            rendered_image, rendered_pcd, bg_mask = render_pcd_to_numpy_open3d(
                 pcd_open3d,
                 width=width, height=height,
                 fx=fx, fy=fy, cx=cx, cy=cy,
-                return_depth=True, return_mask=True,
                 bg_color=(255, 255, 255)
             )
+            fg_mask = ~bg_mask
             rendered_image = torch.from_numpy(rendered_image).float().permute(2, 0, 1) / 255.0
+        
+        pcds_list.append(torch.from_numpy(rendered_pcd))
         images.append(rendered_image)
-        masks.append(torch.tensor(~bg_mask))
+        masks.append(torch.tensor(fg_mask))
 
-        # Optional debug dumps (kept from original)
+        # Optional debug dumps
         import cv2
+        import numpy as np
+        np.save(f"{i}_pcd.npy", rendered_pcd)
+        np.save(f"{i}_mask.npy", fg_mask)
         image_to_save = (rendered_image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
         cv2.imwrite(f"{i}.png", cv2.cvtColor(image_to_save, cv2.COLOR_RGB2BGR))
+        
+        # import ipdb; ipdb.set_trace()
 
     return {
         "images": torch.stack(images).to(pcd.device),

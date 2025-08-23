@@ -4,8 +4,8 @@
         "patch_4": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 4, "align_resolution": 16, "num_patches": 16}},
         "mask": {"function": "mask_l2_loss", "weight": 1.0}
     },
-    "num_ttt_steps": 50,
-    "grad_accum_steps": 8,
+    "num_ttt_steps": 64,
+    "grad_accum_steps": 16,
     "batch_size": 2,
     "optim": {
         "name": "SGD",
@@ -14,7 +14,7 @@
     },
     "augs":
     {
-        "geometric_aug_severity": 0,
-        "color_aug_severity": 5
+        "geometric_aug_severity": 1,
+        "color_aug_severity": 4
     }
 }
