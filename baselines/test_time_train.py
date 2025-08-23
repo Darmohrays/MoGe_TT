@@ -10,7 +10,7 @@ import utils3d
 
 from moge.test.baseline import MGEBaselineInterface
 from test_time.data import generate_jittered_batch
-from test_time.loss import compute_moge2_ttt_loss, compute_moge2_ttt_loss_from_orig
+from test_time.loss import compute_moge2_ttt_loss, compute_moge2_ttt_loss_from_orig, moge2_ttt_loss
 from moge.utils.geometry_torch import normalized_view_plane_uv, recover_focal_shift
 
 class Baseline(MGEBaselineInterface):
@@ -123,8 +123,7 @@ class Baseline(MGEBaselineInterface):
         optimizer_config = config['optim']
         optimizer = torch.optim.SGD(
             [p for p in ttt_model.parameters() if p.requires_grad],
-            lr=optimizer_config["lr"],
-            weight_decay=optimizer_config["weight_decay"]
+            **optimizer_config
         )
         
         # Setup mixed-precision training scaler
@@ -153,8 +152,10 @@ class Baseline(MGEBaselineInterface):
                 data = batch | ttt_output
                 
                 # Compute the self-supervised loss (total, across the batch)
+                
                 # losses = compute_moge2_ttt_loss(data, use_transforms_inv=True,
                 #                                 config=config, device='cuda')
+                # losses = moge2_ttt_loss(data)
 
                 losses = compute_moge2_ttt_loss_from_orig(data, config,
                                                           device='cuda', use_transforms_inv=True)

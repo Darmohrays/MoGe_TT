@@ -23,10 +23,11 @@ def render_pcd_to_numpy_open3d(
     shader: str = "defaultUnlit",
     bg_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
     use_gpu: bool = True,
+    max_retries: int = 10,
+    bg_threshold: float = 0.8,
 ):
     """
-    Render a point cloud and return the color image, point cloud representation,
-    and background mask.
+    Render a point cloud, falling back to a default view if the background is too large.
 
     Args:
         pcd: The Open3D PointCloud object to render.
@@ -41,6 +42,8 @@ def render_pcd_to_numpy_open3d(
         shader: The shader to use for rendering.
         bg_color: The RGB background color as a tuple of floats in [0, 1].
         use_gpu: Whether to attempt GPU acceleration.
+        max_retries: The maximum number of times to attempt rendering.
+        bg_threshold: The maximum allowed ratio of background pixels (0.0 to 1.0).
 
     Returns:
         A tuple containing:
@@ -61,70 +64,109 @@ def render_pcd_to_numpy_open3d(
         cx, cy = width / 2.0, height / 2.0
     intrinsic = PinholeCameraIntrinsic(width, height, fx, fy, cx, cy)
 
-    # ---- Set up camera extrinsics ----
-    if extrinsic is None:
-        extrinsic = np.eye(4, dtype=np.float32)
-
     # ---- Create and configure the renderer ----
     renderer = OffscreenRenderer(width, height)
     
     try:
         if use_gpu:
-            # GPU-specific settings for performance
             renderer.scene.scene.enable_sun_light(False)
             renderer.scene.scene.enable_indirect_light(True)
 
-        # Set background color
         renderer.scene.set_background(
             np.array([bg_color[0], bg_color[1], bg_color[2], 1.0], dtype=np.float32)
         )
 
-        # Set up material properties
         mat = MaterialRecord()
         mat.shader = shader
         mat.point_size = float(point_size)
-
-        # Add geometry to the scene
-        renderer.scene.clear_geometry()
+        
         renderer.scene.add_geometry("pcd", pcd, mat)
 
-        # Set up the camera
-        renderer.setup_camera(intrinsic, extrinsic)
+    except Exception as e:
+        # Cleanup renderer if setup fails
+        del renderer
+        raise e
 
-        # ---- Render color image ----
+    # ---- Loop for rendering and checking background ----
+    background_ratio = 1.0 # Initialize to a failing value
+    for attempt in range(max_retries):
+        current_extrinsic = extrinsic if extrinsic is not None else np.eye(4, dtype=np.float32)
+        renderer.setup_camera(intrinsic, current_extrinsic)
+
+        # ---- Render color and depth images ----
         img_o3d = renderer.render_to_image()
         rendered_image = np.asarray(img_o3d)
-
-        # ---- Render depth image to get Z coordinates ----
         depth_o3d = renderer.render_to_depth_image(z_in_view_space=True)
         depth_np = np.asarray(depth_o3d)
 
-        # ---- Create background mask ----
+        # ---- Check background ratio ----
         bg_mask = np.isinf(depth_np)
+        background_ratio = np.mean(bg_mask)
 
-        # ---- Unproject depth image to 3D point cloud ----
-        v, u = np.indices((height, width))
-        Z = depth_np
-        X = (u - cx) * Z / fx
-        Y = (v - cy) * Z / fy
+        if background_ratio <= bg_threshold:
+            # ---- Unproject depth to create rendered point cloud ----
+            v, u = np.indices((height, width))
+            Z = depth_np
+            X = (u - cx) * Z / fx
+            Y = (v - cy) * Z / fy
 
-        points_camera_space = np.stack([X, Y, Z], axis=-1)
-        points_camera_space[bg_mask] = 0.0
+            points_camera_space = np.stack([X, Y, Z], axis=-1)
+            points_camera_space[bg_mask] = 0.0
 
-        # ---- Transform points from camera space to world space ----
-        points_h = np.concatenate(
-            [points_camera_space, np.ones((height, width, 1))], axis=-1
-        )
-        inv_extrinsic = np.linalg.inv(extrinsic)
-        points_flat = points_h.reshape(-1, 4).T
-        points_world_flat = inv_extrinsic @ points_flat
-        rendered_pcd = points_world_flat.T.reshape(height, width, 4)[..., :3]
+            # ---- Transform points to world space ----
+            points_h = np.concatenate(
+                [points_camera_space, np.ones((height, width, 1))], axis=-1
+            )
+            inv_extrinsic = np.linalg.inv(current_extrinsic)
+            points_flat = points_h.reshape(-1, 4).T
+            points_world_flat = inv_extrinsic @ points_flat
+            rendered_pcd = points_world_flat.T.reshape(height, width, 4)[..., :3]
 
-        return rendered_image, rendered_pcd.astype(np.float32), bg_mask
+            del renderer
+            return rendered_image, rendered_pcd.astype(np.float32), bg_mask
 
-    finally:
-        # Clean up renderer resources
-        del renderer
+    # ---- Fallback if all retries fail ----
+    # If the loop completes, it means a valid sample was not generated.
+    # Instead of raising an error, we warn the user and render a default view.
+    warnings.warn(
+        f"Failed to generate a valid sample after {max_retries} attempts. "
+        f"Last background ratio was {background_ratio:.2f} (threshold: {bg_threshold:.2f}). "
+        f"Falling back to a default view (no geometric augmentation)."
+    )
+
+    # Use a default identity matrix for the extrinsic
+    final_extrinsic = np.eye(4, dtype=np.float32)
+    renderer.setup_camera(intrinsic, final_extrinsic)
+
+    # ---- Render a final time ----
+    img_o3d = renderer.render_to_image()
+    rendered_image = np.asarray(img_o3d)
+    depth_o3d = renderer.render_to_depth_image(z_in_view_space=True)
+    depth_np = np.asarray(depth_o3d)
+    bg_mask = np.isinf(depth_np)
+
+    # ---- Unproject depth to create rendered point cloud ----
+    v, u = np.indices((height, width))
+    Z = depth_np
+    X = (u - cx) * Z / fx
+    Y = (v - cy) * Z / fy
+
+    points_camera_space = np.stack([X, Y, Z], axis=-1)
+    points_camera_space[bg_mask] = 0.0
+
+    # ---- Transform points to world space ----
+    points_h = np.concatenate(
+        [points_camera_space, np.ones((height, width, 1))], axis=-1
+    )
+    # The inverse of the identity matrix is the identity matrix itself
+    inv_extrinsic = np.linalg.inv(final_extrinsic)
+    points_flat = points_h.reshape(-1, 4).T
+    points_world_flat = inv_extrinsic @ points_flat
+    rendered_pcd = points_world_flat.T.reshape(height, width, 4)[..., :3]
+
+    del renderer
+    return rendered_image, rendered_pcd.astype(np.float32), bg_mask
+
 
 def check_gpu_availability():
     """Check if GPU rendering is available and get detailed info."""

@@ -99,8 +99,8 @@ def compute_moge2_ttt_loss(
     *,
     use_transforms_inv: bool = False,
     # weights
-    w_geom: float = 0.1,
-    w_smooth: float = 0.05,
+    w_geom: float = 1.0,
+    w_smooth: float = 0.5,
     w_normal: float = 0.1,
     # w_geom: float = 1.0,
     # w_smooth: float = 0.0,
@@ -215,6 +215,14 @@ def compute_moge2_ttt_loss_from_orig(batch: dict, config: dict, device: str,
     # gt_points = _apply_transform(gt_points, T)
     gt_focal = 1 / (1 / gt_intrinsics[..., 0, 0] ** 2 + 1 / gt_intrinsics[..., 1, 1] ** 2) ** 0.5
     
+    # import numpy as np
+    # test_idx = 1
+    # np.save("points_student.npy", pred_points[test_idx].detach().cpu().numpy())
+    # np.save("points_gt_in_target.npy", gt_points[test_idx].detach().cpu().numpy())
+    # np.save("valid.npy", gt_mask[test_idx].detach().cpu().numpy())
+    # np.save("image.npy", image[0].permute(1, 2, 0).detach().cpu().numpy())
+    # import ipdb; ipdb.set_trace()
+
     loss_list = []
     for i in range(current_batch_size):
         for k, v in config['loss'].items():
@@ -240,3 +248,132 @@ def compute_moge2_ttt_loss_from_orig(batch: dict, config: dict, device: str,
         loss_list.append(loss_)
 
         return dict(loss=sum(loss_list) / len(loss_list))
+
+def moge2_ttt_loss(batch,
+                   lambda_point=1.0,
+                   lambda_normal=0.1,
+                   lambda_smooth=0.01,
+                   edge_gamma=10.0,
+                   apply_transform_to_gt=False,
+                   eps=1e-6):
+    """
+    Computes a stable per-image TTT loss with:
+      - point-map equivariance (L1 in meters),
+      - normal consistency (cosine),
+      - edge-aware smoothness (on Z channel).
+
+    Expected batch keys & shapes:
+      images:      [B, 3, H, W]  float32   (target/jittered image)
+      masks_gt:    [B, H, W]     bool      (teacher visibility mask in target view)
+      points_gt:   [B, H*W, 3]   float32   (teacher points (target view); flattened)
+      transforms:  [B, 4, 4]     float32   (source->target; used only if apply_transform_to_gt=True)
+      transforms_inv:[B, 4, 4]   float32   (target->source; unused here)
+      points:      [B, H, W, 3]  float32   (student points (target view))
+      mask:        [B, H, W]     float32   (student validity/confidence)
+
+    Returns:
+      dict with 'total', 'point_l1', 'normal_cos', 'smooth'
+    """
+    images = batch["images"]
+    masks_gt = batch["masks_gt"].float()
+    points_gt = batch["points_gt"]
+    points = batch["points"]
+    mask_student = batch["mask"].float()
+
+    B, C, H, W = images.shape
+    assert points.shape[:3] == (B, H, W), "points must be [B,H,W,3]"
+    assert points.shape[3] == 3
+    assert points_gt.shape[:3] == (B, H, W)
+
+    # Optionally transform teacher points (source->target) if they are still in source frame
+    if apply_transform_to_gt:
+        # points_gt currently in source frame -> homogeneous -> transform -> back
+        ones = torch.ones(B, H, W, 1, device=points_gt.device, dtype=points_gt.dtype)
+        p_h = torch.cat([points_gt, ones], dim=-1).view(B, -1, 4)                      # [B,HW,4]
+        T = batch["transforms"]                                                        # [B,4,4]
+        p_t = (T @ p_h.transpose(1, 2)).transpose(1, 2)[..., :3]                       # [B,HW,3]
+        points_gt = p_t.view(B, H, W, 3)
+
+    # Visibility / confidence mask
+    # Combine teacher visibility and student confidence
+    M = masks_gt * mask_student                                                       # [B,H,W]
+    M3 = M.unsqueeze(-1)                                                              # [B,H,W,1]
+
+    # -------------------------
+    # 1) Point-map equivariance (L1 in meters)
+    # -------------------------
+    # Stop-grad teacher
+    with torch.no_grad():
+        points_gt_det = points_gt
+
+    point_l1_num = (torch.abs(points - points_gt_det) * M3).sum()
+    point_l1_den = (M3.sum() * 3.0).clamp(min=eps)
+    point_l1 = point_l1_num / point_l1_den
+
+    # -------------------------
+    # 2) Normal consistency (student vs teacher)
+    #    Normals computed from 2x2 cells: n = cross(dy, dx)
+    # -------------------------
+    def normals_from_points(P):
+        # P: [B,H,W,3] -> normals at top-left of each 2x2 cell: [B,H-1,W-1,3]
+        P00 = P[:, :-1, :-1, :]
+        P10 = P[:, :-1,  1:, :]
+        P01 = P[:,  1:, :-1, :]
+        dx = P10 - P00
+        dy = P01 - P00
+        n = torch.cross(dy, dx, dim=-1)
+        n = F.normalize(n, dim=-1, eps=1e-9)
+        return n
+
+    n_student = normals_from_points(points)
+    with torch.no_grad():
+        n_teacher = normals_from_points(points_gt)
+
+    # validity for 2x2 cells (all three corners visible)
+    M00 = M[:, :-1, :-1]
+    M10 = M[:, :-1,  1:]
+    M01 = M[:,  1:, :-1]
+    Mcell = (M00 * M10 * M01)                                                         # [B,H-1,W-1]
+    Mcell3 = Mcell.unsqueeze(-1)
+
+    cos_sim = (n_student * n_teacher).sum(dim=-1)                                     # [B,H-1,W-1]
+    normal_cos_num = ((1.0 - cos_sim) * Mcell).sum()
+    normal_cos_den = Mcell.sum().clamp(min=eps)
+    normal_cos = normal_cos_num / normal_cos_den
+
+    # -------------------------
+    # 3) Edge-aware smoothness (on Z channel)
+    #    weights = exp(-gamma * |∇I|)
+    # -------------------------
+    # grayscale for edge weights
+    r, g, b = images[:, 0:1], images[:, 1:2], images[:, 2:3]
+    gray = (0.2989 * r + 0.5870 * g + 0.1140 * b)
+
+    gradI_x = torch.abs(gray[:, :, :, 1:] - gray[:, :, :, :-1]).squeeze(1)            # [B,H,W-1]
+    gradI_y = torch.abs(gray[:, :, 1:, :] - gray[:, :, :-1, :]).squeeze(1)            # [B,H-1,W]
+    w_x = torch.exp(-edge_gamma * gradI_x)                                            # [B,H,W-1]
+    w_y = torch.exp(-edge_gamma * gradI_y)                                            # [B,H-1,W]
+
+    Z = points[..., 2]                                                                # [B,H,W]
+    Mx = (M[:, :, 1:] * M[:, :, :-1])                                                 # [B,H,W-1]
+    My = (M[:, 1:, :] * M[:, :-1, :])                                                 # [B,H-1,W]
+
+    dz_x = torch.abs(Z[:, :, 1:] - Z[:, :, :-1])                                      # [B,H,W-1]
+    dz_y = torch.abs(Z[:, 1:, :] - Z[:, :-1, :])                                      # [B,H-1,W]
+
+    smooth_x_num = (w_x * Mx * dz_x).sum()
+    smooth_x_den = (w_x * Mx).sum().clamp(min=eps)
+    smooth_y_num = (w_y * My * dz_y).sum()
+    smooth_y_den = (w_y * My).sum().clamp(min=eps)
+    smooth = 0.5 * (smooth_x_num / smooth_x_den + smooth_y_num / smooth_y_den)
+
+    # -------------------------
+    # Total
+    # -------------------------
+    total = lambda_point * point_l1 + lambda_normal * normal_cos + lambda_smooth * smooth
+    return {
+        "loss": total,
+        "point_l1": point_l1,
+        "normal_cos": normal_cos,
+        "smooth": smooth
+    }
