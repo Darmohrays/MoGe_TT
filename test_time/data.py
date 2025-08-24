@@ -189,7 +189,7 @@ def _geom_params_from_severity(sev: int, mode: str) -> dict:
     trans_range = (
         (-trans_max_xy, trans_max_xy),  # (xmin, xmax)
         (-trans_max_xy, trans_max_xy),  # (ymin, ymax)
-        (-trans_max_z*50, 0)     # (zmin, zmax)
+        (-trans_max_z*150, 0)     # (zmin, zmax)
     )
 
     params = {"trans_range": trans_range}

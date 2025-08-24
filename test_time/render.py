@@ -19,7 +19,7 @@ def render_pcd_to_numpy_open3d(
     cx: float | None = None,
     cy: float | None = None,
     extrinsic: np.ndarray | None = None,
-    point_size: float = 2.0,
+    point_size: float = 4.0,
     shader: str = "defaultUnlit",
     bg_color: tuple[float, float, float] = (0.0, 0.0, 0.0),
     use_gpu: bool = True,
@@ -70,7 +70,7 @@ def render_pcd_to_numpy_open3d(
     try:
         if use_gpu:
             renderer.scene.scene.enable_sun_light(False)
-            renderer.scene.scene.enable_indirect_light(True)
+            renderer.scene.scene.enable_indirect_light(False)
 
         renderer.scene.set_background(
             np.array([bg_color[0], bg_color[1], bg_color[2], 1.0], dtype=np.float32)

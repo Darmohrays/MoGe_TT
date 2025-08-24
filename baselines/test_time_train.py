@@ -64,9 +64,9 @@ class Baseline(MGEBaselineInterface):
                 'intrinsics': output['intrinsics'],
             }
         
-    def initial_inference(self, image, intrinsics=None, fov_x=None):
+    def initial_inference(self, image, model, intrinsics=None, fov_x=None):
         with torch.inference_mode():
-            output = self._original_model(image.unsqueeze(0),
+            output = model(image.unsqueeze(0),
                                           num_tokens=self.num_tokens)
             
             _, img_h, img_w = image.shape
@@ -105,7 +105,7 @@ class Baseline(MGEBaselineInterface):
         else:
             fov_x = None
 
-        output = self.initial_inference(image, intrinsics, fov_x)
+        output = self.initial_inference(image, self._original_model, intrinsics, fov_x)
 
         from moge.model import import_model_class_by_version
         MoGeModel = import_model_class_by_version(self.version)
@@ -136,7 +136,7 @@ class Baseline(MGEBaselineInterface):
 
         for step in range(num_ttt_steps):
             optimizer.zero_grad()
-            
+
             # Generate a batch of jittered/augmented views from the single input image
             batch = generate_jittered_batch(image, output, config['batch_size'],
                                             **config['augs'])
@@ -145,7 +145,7 @@ class Baseline(MGEBaselineInterface):
             with torch.amp.autocast(enabled=self.use_fp16, device_type="cuda"):
                 # Forward pass through the model being adapted
                 ttt_output = ttt_model(batch['images'], num_tokens=self.num_tokens)
-                
+
                 ttt_output["points"] = ttt_output["points"] * ttt_output["metric_scale"][:, None, None, None]
 
                 # Combine original data and model output for loss calculation
@@ -174,6 +174,8 @@ class Baseline(MGEBaselineInterface):
                 scaler.step(optimizer) # Unscale gradients and update weights
                 scaler.update()        # Update the scaler for the next iteration
                 optimizer.zero_grad()  # Reset gradients for the next accumulation cycle
+
+                output = self.initial_inference(image, ttt_model, intrinsics, fov_x)
         
         # -------------------- END: Test-Time Training Loop -------------------- #
         with torch.inference_mode():
