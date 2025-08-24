@@ -522,7 +522,7 @@ def generate_jittered_batch(
         gen_i.manual_seed(child_seed)
 
         # Severity-derived defaults; user jitter_kwargs can still override
-        base_geom = _geom_params_from_severity(geometric_aug_severity, mode)
+        base_geom = _geom_params_from_severity(max(geometric_aug_severity-1, 0), mode)
         if force_no_geom:
             # Hard override to guarantee NO geometric changes
             geom_kwargs = {**jitter_kwargs}
@@ -597,9 +597,9 @@ def generate_jittered_batch(
         # ---- keep old branches for sev=0 and sev>=2
         elif geometric_aug_severity == 0:
             if color_augmentation is None:
-                final_image = image_aug_in
+                final_image = image_aug
             else:
-                final_image = color_augmentation(image_aug_in)[0]
+                final_image = color_augmentation(image_aug)[0]
             final_mask = mask.detach().clone()
             pcd_final = pcd
             T = torch.eye(4, dtype=pcd.dtype, device=pcd.device)
@@ -608,9 +608,9 @@ def generate_jittered_batch(
         else:
             # Colors for visible (masked) points
             if color_augmentation is None:
-                image_aug = image_aug_in
+                image_aug = image_aug
             else:
-                image_aug = color_augmentation(image_aug_in)[0]
+                image_aug = color_augmentation(image_aug)[0]
 
             pcd_out_i = pcd_out
             pcd_out_masked = pcd_out_i[mask]
