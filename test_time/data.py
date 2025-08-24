@@ -356,8 +356,9 @@ def generate_jittered_batch(
 
         # Open3D render
         if geometric_aug_severity == 0:
-            rendered_image = image_aug
-            bg_mask = mask.detach().clone()
+            final_image = image_aug
+            final_mask = mask.detach().clone()
+            pcd_final = pcd
         else:
             # Colors for visible (masked) points
             pcd_out_i = pcd_out
@@ -374,18 +375,20 @@ def generate_jittered_batch(
                 bg_color=(255, 255, 255)
             )
             fg_mask = ~bg_mask
-            rendered_image = torch.from_numpy(rendered_image).float().permute(2, 0, 1) / 255.0
+            final_image = torch.from_numpy(rendered_image).float().permute(2, 0, 1) / 255.0
+            pcd_final = torch.from_numpy(rendered_pcd)
+            final_mask = torch.tensor(fg_mask)
         
-        pcds_list.append(torch.from_numpy(rendered_pcd))
-        images.append(rendered_image)
-        masks.append(torch.tensor(fg_mask))
+        pcds_list.append(pcd_final)
+        images.append(final_image)
+        masks.append(final_mask)
 
         # Optional debug dumps
         import cv2
         import numpy as np
-        np.save(f"{i}_pcd.npy", rendered_pcd)
-        np.save(f"{i}_mask.npy", fg_mask)
-        image_to_save = (rendered_image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
+        np.save(f"{i}_pcd.npy", pcd_final.cpu().numpy())
+        np.save(f"{i}_mask.npy", final_mask.cpu().numpy())
+        image_to_save = (final_image.permute(1, 2, 0).cpu().numpy() * 255).astype("uint8")
         cv2.imwrite(f"{i}.png", cv2.cvtColor(image_to_save, cv2.COLOR_RGB2BGR))
         
         # import ipdb; ipdb.set_trace()
