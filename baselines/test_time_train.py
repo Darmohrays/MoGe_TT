@@ -11,6 +11,7 @@ import utils3d
 from moge.test.baseline import MGEBaselineInterface
 from test_time.data import generate_jittered_batch
 from test_time.loss import compute_moge2_ttt_loss, compute_moge2_ttt_loss_from_orig, moge2_ttt_loss
+from test_time.model_utils import toggle_norm_layers
 from moge.utils.geometry_torch import normalized_view_plane_uv, recover_focal_shift
 
 class Baseline(MGEBaselineInterface):
@@ -76,7 +77,7 @@ class Baseline(MGEBaselineInterface):
                 focal, shift = recover_focal_shift(output["points"], output['mask'])
             else:
                 # Focal is known, recover shift only
-                focal = aspect_ratio / (1 + aspect_ratio ** 2) ** 0.5 / torch.tan(torch.deg2rad(torch.as_tensor(fov_x, device=points.device, dtype=points.dtype) / 2))
+                focal = aspect_ratio / (1 + aspect_ratio ** 2) ** 0.5 / torch.tan(torch.deg2rad(torch.as_tensor(fov_x, device=output["points"].device, dtype=output["points"].dtype) / 2))
                 if focal.ndim == 0:
                     focal = focal[None].expand(output["points"].shape[0])
                 _, shift = recover_focal_shift(output["points"], output["mask"], focal=focal)
@@ -89,10 +90,9 @@ class Baseline(MGEBaselineInterface):
             if "mask" in output:
                 output["mask"] = output["mask"] > 0.5
                 output["mask"] &= output["points"][..., 2] > 0
-        
-        output['points'] = output['points'] * output['metric_scale']
+        if self.version == 'v2':
+            output['points'] = output['points'] * output['metric_scale']
 
-        # import ipdb; ipdb.set_trace()
         return output
 
     def infer_for_evaluation(self, image: torch.FloatTensor,
@@ -111,17 +111,46 @@ class Baseline(MGEBaselineInterface):
         MoGeModel = import_model_class_by_version(self.version)
         ttt_model = MoGeModel.from_pretrained(self._pretrained_model_name_or_path).to(self.device)
 
-        if self.version == 'v1':
-            ttt_model.backbone.requires_grad_(False)
-        elif self.version == 'v2':
-            ttt_model.encoder.requires_grad_(False)
+
+        if config["model"]['freeze_encoder']:
+            if self.version == 'v1':
+                ttt_model.backbone.requires_grad_(False)
+            elif self.version == 'v2':
+                ttt_model.encoder.requires_grad_(False)
+        
+        if config["model"]['freeze_heads']:
+            if self.version == 'v1':
+                ttt_model.head.requires_grad_(False)
+            elif self.version == 'v2':
+                ttt_model.scale_head.requires_grad_(False)
+                ttt_model.points_head.requires_grad_(False)
+                ttt_model.normal_head.requires_grad_(False)
+                ttt_model.mask_head.requires_grad_(False)
+        
+        if config["model"]["freeze_norm_layers"]:
+            toggle_norm_layers(ttt_model, freeze=True)
+        
+        if config["model"]["freeze_neck"]:
+            if self.version == 'v2':
+                ttt_model.neck.requires_grad_(False)
+
         ttt_model.train()
 
         # ------------------- START: Test-Time Training Loop ------------------- #
         
         # Setup optimizer to update only the trainable parameters (unfrozen layers)
         optimizer_config = config['optim']
-        optimizer = torch.optim.SGD(
+        optimizer_name = config["optim_name"]
+        
+        try:
+            # Dynamically get the optimizer class from the torch.optim module
+            optimizer_class = getattr(torch.optim, optimizer_name)
+        except AttributeError:
+            # Handle cases where the specified optimizer doesn't exist
+            raise ValueError(f"Optimizer '{optimizer_name}' not found in torch.optim")
+
+        # Instantiate the chosen optimizer with its specific configuration
+        optimizer = optimizer_class(
             [p for p in ttt_model.parameters() if p.requires_grad],
             **optimizer_config
         )
@@ -146,17 +175,13 @@ class Baseline(MGEBaselineInterface):
                 # Forward pass through the model being adapted
                 ttt_output = ttt_model(batch['images'], num_tokens=self.num_tokens)
 
-                ttt_output["points"] = ttt_output["points"] * ttt_output["metric_scale"][:, None, None, None]
+                if self.version == 'v2':
+                    ttt_output["points"] = ttt_output["points"] * ttt_output["metric_scale"][:, None, None, None]
 
                 # Combine original data and model output for loss calculation
                 data = batch | ttt_output
                 
-                # Compute the self-supervised loss (total, across the batch)
-                
-                # losses = compute_moge2_ttt_loss(data, use_transforms_inv=True,
-                #                                 config=config, device='cuda')
-                # losses = moge2_ttt_loss(data)
-
+                # Compute the self-supervised loss
                 losses = compute_moge2_ttt_loss_from_orig(data, config,
                                                           device='cuda', use_transforms_inv=True)
                 loss = losses['loss']
@@ -169,11 +194,11 @@ class Baseline(MGEBaselineInterface):
             # Backward pass: scale loss and compute gradients
             scaler.scale(loss).backward()
 
-            # Update model weights after accumulating gradients for grad_accum_steps
+            # Update model weights after accumulating gradients
             if (step + 1) % grad_accum_steps == 0:
-                scaler.step(optimizer) # Unscale gradients and update weights
-                scaler.update()        # Update the scaler for the next iteration
-                optimizer.zero_grad()  # Reset gradients for the next accumulation cycle
+                scaler.step(optimizer)
+                scaler.update()
+                optimizer.zero_grad()
 
                 output = self.initial_inference(image, ttt_model, intrinsics, fov_x)
         

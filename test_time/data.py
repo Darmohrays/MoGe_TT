@@ -3,12 +3,190 @@ from typing import Tuple, Union, Optional, Dict
 import torch
 import kornia.augmentation as K
 from kornia.augmentation import AugmentationSequential
-
+import torch.nn.functional as F
 
 # Configure for GPU usage - more comprehensive setup
 from .render import render_pcd_to_numpy_open3d
 import open3d as o3d
 
+def _adjust_intrinsics_after_crop_resize_flip(
+    K_norm: torch.Tensor,  # 3x3 normalized intrinsics (fx/w, fy/h, cx/w, cy/h)
+    width: int,
+    height: int,
+    x0: int,
+    y0: int,
+    cw: int,
+    ch: int,
+    hflip: bool,
+    vflip: bool,
+) -> torch.Tensor:
+    """
+    Update normalized intrinsics after a crop (x0,y0,cw,ch), resize back to (H,W),
+    and optional flips. Assumes principal point & focal are in pixel units when
+    de-normalized with (W,H). Returns a new 3x3 normalized intrinsics matrix.
+    """
+    K = K_norm.clone()
+    W, H = width, height
+    sx = W / float(cw)  # resize scale x
+    sy = H / float(ch)  # resize scale y
+
+    fx_px = K[0, 0].item() * W
+    fy_px = K[1, 1].item() * H
+    cx_px = K[0, 2].item() * W
+    cy_px = K[1, 2].item() * H
+
+    # crop -> shift principal point; resize -> scale focal & principal
+    fx_px *= sx
+    fy_px *= sy
+    cx_px = (cx_px - x0) * sx
+    cy_px = (cy_px - y0) * sy
+
+    # flips mirror the principal point around image center axes
+    if hflip:
+        cx_px = (W - 1) - cx_px
+    if vflip:
+        cy_px = (H - 1) - cy_px
+
+    # back to normalized
+    K[0, 0] = fx_px / W
+    K[1, 1] = fy_px / H
+    K[0, 2] = cx_px / W
+    K[1, 2] = cy_px / H
+    K[2, 2] = 1.0
+    return K
+
+
+def _crop_flip_image_mask_pcd(
+    image: torch.Tensor,          # [C,H,W], float [0,1]
+    mask: torch.Tensor,           # [H,W], bool
+    pcd: torch.Tensor,            # [H,W,3], float (camera-space XYZ per pixel)
+    K_norm: torch.Tensor,         # [3,3] normalized intrinsics
+    *,
+    generator: Optional[torch.Generator] = None,
+    scale_range: Tuple[float, float] = (0.85, 1.0),
+    hflip_p: float = 0.5,
+    vflip_p: float = 0.0,
+    min_true_ratio: float = 0.10,
+    max_tries: int = 5,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Random crop (then resize back to original HxW) and optional flips applied
+    consistently to image/mask/pcd, plus intrinsics adjustment.
+
+    Safeguard: ensure the *resized* mask has at least `min_true_ratio` True pixels.
+    If not, resample up to `max_tries`. On failure, return the original inputs.
+    - image : bilinear
+    - mask  : nearest
+    - pcd   : nearest  (avoid mixing 3D points)
+    """
+    C, H, W = image.shape
+    device = image.device
+
+    def _bernoulli(p: float) -> bool:
+        if p <= 0.0: return False
+        if p >= 1.0: return True
+        r = torch.rand((), device=device, generator=generator).item()
+        return r < p
+
+    def _adjust_intrinsics_after_crop_resize_flip(
+        K_in: torch.Tensor,
+        width: int, height: int,
+        x0: int, y0: int, cw: int, ch: int,
+        hflip: bool, vflip: bool,
+    ) -> torch.Tensor:
+        K = K_in.clone()
+        W_, H_ = width, height
+        sx = W_ / float(cw)
+        sy = H_ / float(ch)
+
+        fx_px = K[0, 0].item() * W_
+        fy_px = K[1, 1].item() * H_
+        cx_px = K[0, 2].item() * W_
+        cy_px = K[1, 2].item() * H_
+
+        fx_px *= sx
+        fy_px *= sy
+        cx_px = (cx_px - x0) * sx
+        cy_px = (cy_px - y0) * sy
+
+        if hflip:
+            cx_px = (W_ - 1) - cx_px
+        if vflip:
+            cy_px = (H_ - 1) - cy_px
+
+        K[0, 0] = fx_px / W_
+        K[1, 1] = fy_px / H_
+        K[0, 2] = cx_px / W_
+        K[1, 2] = cy_px / H_
+        K[2, 2] = 1.0
+        return K
+
+    # Keep originals for fallback
+    orig_img, orig_msk, orig_pcd, orig_K = image, mask, pcd, K_norm
+
+    for _attempt in range(max_tries):
+        # ----- sample crop size
+        if generator is None:
+            s = torch.empty(1, device=device).uniform_(scale_range[0], scale_range[1]).item()
+        else:
+            s = (torch.rand(1, device=device, generator=generator) *
+                 (scale_range[1] - scale_range[0]) + scale_range[0]).item()
+        cw = max(1, int(round(W * s)))
+        ch = max(1, int(round(H * s)))
+
+        # top-left
+        max_x0 = max(0, W - cw)
+        max_y0 = max(0, H - ch)
+        if max_x0 > 0:
+            x0 = int(torch.randint(0, max_x0 + 1, (1,),
+                                    generator=generator, device=device).item())
+        else:
+            x0 = 0
+        if max_y0 > 0:
+            y0 = int(torch.randint(0, max_y0 + 1, (1,),
+                                    generator=generator, device=device).item())
+        else:
+            y0 = 0
+
+        # ----- crop
+        img_crop  = image[:, y0:y0+ch, x0:x0+cw]
+        msk_crop  = mask[y0:y0+ch, x0:x0+cw]
+        pcd_crop  = pcd[y0:y0+ch, x0:x0+cw, :]
+
+        # ----- flips
+        do_hflip = _bernoulli(hflip_p)
+        do_vflip = _bernoulli(vflip_p)
+
+        if do_hflip:
+            img_crop = torch.flip(img_crop, dims=[-1])
+            msk_crop = torch.flip(msk_crop, dims=[-1])
+            pcd_crop = torch.flip(pcd_crop, dims=[1])  # [Hc,Wc,3]
+
+        if do_vflip:
+            img_crop = torch.flip(img_crop, dims=[-2])
+            msk_crop = torch.flip(msk_crop, dims=[-2])
+            pcd_crop = torch.flip(pcd_crop, dims=[0])  # [Hc,Wc,3]
+
+        # ----- resize back to (H,W)
+        img_res = F.interpolate(img_crop.unsqueeze(0), size=(H, W),
+                                mode="bilinear", align_corners=False)[0]
+        msk_res = F.interpolate(msk_crop[None, None].float(), size=(H, W),
+                                mode="nearest")[0, 0].bool()
+        pcd_res = F.interpolate(pcd_crop.permute(2, 0, 1).unsqueeze(0),
+                                size=(H, W), mode="nearest")[0].permute(1, 2, 0)
+
+        # ----- check mask ratio
+        fg_ratio = msk_res.float().mean().item()
+        if fg_ratio >= min_true_ratio:
+            K_out = _adjust_intrinsics_after_crop_resize_flip(
+                K_norm, width=W, height=H,
+                x0=x0, y0=y0, cw=cw, ch=ch,
+                hflip=do_hflip, vflip=do_vflip
+            )
+            return img_res, msk_res, pcd_res, K_out
+
+    # Fallback: return originals unchanged
+    return orig_img, orig_msk, orig_pcd, orig_K.clone()
 
 def _rodrigues_pt(omega: torch.Tensor) -> torch.Tensor:
     """
@@ -203,46 +381,83 @@ def _geom_params_from_severity(sev: int, mode: str) -> dict:
     
 
 def _build_color_augmentation(sev: int):
-        if sev == 0:
-            return None  # handled downstream (no-op)
+    """
+    Builds a sequential color augmentation pipeline with severity scaling.
 
-        # Ranges increase with severity
-        # Shared ±range for brightness/contrast/saturation
-        bcs = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50][sev]
-        hue_r = [0.0, 0.03, 0.06, 0.10, 0.20, 0.30][sev]
-        gamma_amp = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50][sev]
+    Args:
+        sev (int): Severity level from 0 (no-op) to 5 (strongest).
 
-        # Probabilities scale with severity
-        p_main = min(0.16 * sev, 0.95)              # for ColorJitter
-        p_aux  = min(0.12 * sev, 0.8)               # for hue/sat/auto-contrast
-        p_gs   = min(0.06 * sev, 0.3)               # grayscale
-        p_gamma= min(0.10 * sev, 0.7)               # gamma
+    Returns:
+        An AugmentationSequential object or None if sev is 0.
+    """
+    if sev == 0:
+        return None  # No augmentations for severity 0
 
-        gamma_lo = max(1.0 - gamma_amp, 0.5)
-        gamma_hi = 1.0 + gamma_amp
-        gain_lo  = max(1.0 - 0.1 * sev, 0.5)
-        gain_hi  = 1.0 + 0.1 * sev
+    # --- Augmentation Parameter Ranges (increase with severity) ---
+    bcs = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50][sev]  # Brightness/Contrast/Saturation
+    hue_r = [0.0, 0.03, 0.06, 0.10, 0.20, 0.30][sev]  # Hue
+    gamma_amp = [0.0, 0.05, 0.10, 0.20, 0.35, 0.50][sev]  # Gamma
+    sharp_factor = [0.0, 0.1, 0.2, 0.4, 0.7, 1.0][sev]  # Sharpness
+    posterize_bits = [8, 7, 6, 5, 4, 3][sev]  # Posterize (lower is stronger)
+    solarize_thresh = [0.0, 0.05, 0.1, 0.15, 0.2, 0.25][sev] # Solarize range
 
-        # Compose Kornia augmentations
-        transforms = [
-            K.ColorJitter(
-                brightness=bcs, contrast=bcs, saturation=bcs, hue=hue_r, p=p_main
-            ),
-            K.RandomGamma(gamma=(gamma_lo, gamma_hi), gain=(gain_lo, gain_hi), p=p_gamma),
-            K.RandomHue(hue=(-hue_r, hue_r), p=p_aux),
-            K.RandomSaturation(saturation=(max(1 - bcs, 0.1), 1 + bcs), p=p_aux),
-            K.RandomGrayscale(p=p_gs),
-            K.RandomAutoContrast(p=p_aux),
-        ]
+    # --- Augmentation Probabilities (scale with severity) ---
+    p_main = min(0.16 * sev, 0.95)      # for ColorJitter
+    p_aux = min(0.12 * sev, 0.8)        # for hue/sat/auto-contrast
+    p_gs = min(0.06 * sev, 0.3)         # grayscale
+    p_gamma = min(0.10 * sev, 0.7)      # gamma
+    p_sharp = min(0.09 * sev, 0.6)      # sharpness
+    p_posterize = min(0.07 * sev, 0.4)  # posterize
+    p_solarize = min(0.07 * sev, 0.4)   # solarize
+    p_equalize = min(0.08 * sev, 0.5)   # equalize
+    p_invert = min(0.05 * sev, 0.25)    # invert
+    p_shuffle = min(0.05 * sev, 0.25)   # channel shuffle
 
-        # Apply up to N transforms per call (bounded by list length)
-        random_apply = max(1, min(1 + 2 * sev, len(transforms)))
+    # --- Calculate final parameter ranges ---
+    gamma_lo = max(1.0 - gamma_amp, 0.5)
+    gamma_hi = 1.0 + gamma_amp
+    gain_lo = max(1.0 - 0.1 * sev, 0.5)
+    gain_hi = 1.0 + 0.1 * sev
+    solar_lo = max(0.5 - solarize_thresh, 0.0)
+    solar_hi = min(0.5 + solarize_thresh, 1.0)
 
-        return AugmentationSequential(
-            *transforms,
-            random_apply=random_apply,
-            data_keys=["input"],
-        )
+    # --- Compose Kornia augmentations ---
+    transforms = [
+        # --- Original Augmentations ---
+        K.ColorJitter(
+            brightness=bcs, contrast=bcs, saturation=bcs, hue=hue_r, p=p_main
+        ),
+        K.RandomGamma(gamma=(gamma_lo, gamma_hi), gain=(gain_lo, gain_hi), p=p_gamma),
+        K.RandomHue(hue=(-hue_r, hue_r), p=p_aux),
+        K.RandomSaturation(saturation=(max(1 - bcs, 0.1), 1 + bcs), p=p_aux),
+        K.RandomGrayscale(p=p_gs),
+        K.RandomAutoContrast(p=p_aux),
+
+        # --- Added Augmentations ---
+        # Adjusts image sharpness.
+        K.RandomSharpness(sharpness=sharp_factor, p=p_sharp),
+        # Reduces the number of bits for each color channel.
+        K.RandomPosterize(bits=posterize_bits, p=p_posterize),
+        # Inverts pixel values above a threshold.
+        K.RandomSolarize(thresholds=(solar_lo, solar_hi), p=p_solarize),
+        # Applies histogram equalization.
+        K.RandomEqualize(p=p_equalize),
+        # Inverts all pixel values.
+        # K.RandomInvert(p=p_invert),
+        # Randomly shuffles the color channels (e.g., RGB -> BGR).
+        K.RandomChannelShuffle(p=p_shuffle),
+    ]
+
+    # Apply up to N transforms per call. The number of transforms applied
+    # increases with severity, bounded by the total number available.
+    random_apply = max(1, min(1 + 2 * sev, len(transforms)))
+
+    return AugmentationSequential(
+        *transforms,
+        random_apply=random_apply,
+        data_keys=["input"],
+    )
+
 
 
 def generate_jittered_batch(
@@ -354,13 +569,49 @@ def generate_jittered_batch(
         else:
             image_aug = color_augmentation(image)[0]
 
-        # Open3D render
-        if geometric_aug_severity == 0:
-            final_image = image_aug
+        # ------------------------------
+        # Special case: severity == 1
+        # ------------------------------
+        if geometric_aug_severity == 1:
+            # No 3D jitter, no Open3D rendering. Do crop/flip in image-space and
+            # keep point cloud + mask consistent. Adjust intrinsics accordingly.
+            img_cf, msk_cf, pcd_cf, K_cf = _crop_flip_image_mask_pcd(
+                image_aug, mask, pcd,
+                intrinsics[-1],  # the clone we appended above
+                generator=gen_i,
+                scale_range=(0.5, 1.0),  # mild crops for sev=1
+                hflip_p=0.5,
+                vflip_p=0.0,
+            )
+
+            final_image = img_cf
+
+            final_mask = msk_cf
+            pcd_final  = pcd_cf
+            intrinsics[-1] = K_cf  # replace with adjusted intrinsics
+
+            # transforms are identity since we didn't change 3D frame
+            T = torch.eye(4, dtype=pcd.dtype, device=pcd.device)
+            T_inv = T.clone()
+
+        # ---- keep old branches for sev=0 and sev>=2
+        elif geometric_aug_severity == 0:
+            if color_augmentation is None:
+                final_image = image_aug_in
+            else:
+                final_image = color_augmentation(image_aug_in)[0]
             final_mask = mask.detach().clone()
             pcd_final = pcd
+            T = torch.eye(4, dtype=pcd.dtype, device=pcd.device)
+            T_inv = T.clone()
+
         else:
             # Colors for visible (masked) points
+            if color_augmentation is None:
+                image_aug = image_aug_in
+            else:
+                image_aug = color_augmentation(image_aug_in)[0]
+
             pcd_out_i = pcd_out
             pcd_out_masked = pcd_out_i[mask]
             colors_masked = image_aug[:, mask].T

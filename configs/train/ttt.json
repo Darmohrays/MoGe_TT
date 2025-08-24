@@ -17,7 +17,7 @@
     },
     "augs":
     {
-        "geometric_aug_severity": 2,
+        "geometric_aug_severity": 1,
         "color_aug_severity": 3
     }
 }
