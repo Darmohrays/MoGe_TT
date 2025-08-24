@@ -247,7 +247,7 @@ def compute_moge2_ttt_loss_from_orig(batch: dict, config: dict, device: str,
         loss_ = sum([weight_dict[k] * loss_dict[k] for k in loss_dict], start=torch.tensor(0.0, device=device))
         loss_list.append(loss_)
 
-        return dict(loss=sum(loss_list) / len(loss_list))
+        return loss_dict | dict(loss=sum(loss_list) / len(loss_list))
 
 def moge2_ttt_loss(batch,
                    lambda_point=1.0,

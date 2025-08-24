@@ -23,8 +23,8 @@ class Baseline(MGEBaselineInterface):
         self.version = version
 
         self._pretrained_model_name_or_path = pretrained_model_name_or_path
-        self._original_model = MoGeModel.from_pretrained(pretrained_model_name_or_path).to(device).eval()
-        self._original_model.requires_grad_(False)
+        # self._original_model = MoGeModel.from_pretrained(pretrained_model_name_or_path).to(device).eval()
+        # self._original_model.requires_grad_(False)
         
         self.device = torch.device(device)
         self.num_tokens = num_tokens
@@ -65,7 +65,7 @@ class Baseline(MGEBaselineInterface):
                 'intrinsics': output['intrinsics'],
             }
         
-    def initial_inference(self, image, model, intrinsics=None, fov_x=None):
+    def initial_inference(self, image, model, intrinsics=None, fov_x=None, use_scale=False):
         with torch.inference_mode():
             output = model(image.unsqueeze(0),
                                           num_tokens=self.num_tokens)
@@ -90,7 +90,7 @@ class Baseline(MGEBaselineInterface):
             if "mask" in output:
                 output["mask"] = output["mask"] > 0.5
                 output["mask"] &= output["points"][..., 2] > 0
-        if self.version == 'v2':
+        if self.version == 'v2' and use_scale:
             output['points'] = output['points'] * output['metric_scale']
 
         return output
@@ -105,12 +105,18 @@ class Baseline(MGEBaselineInterface):
         else:
             fov_x = None
 
-        output = self.initial_inference(image, self._original_model, intrinsics, fov_x)
 
         from moge.model import import_model_class_by_version
         MoGeModel = import_model_class_by_version(self.version)
         ttt_model = MoGeModel.from_pretrained(self._pretrained_model_name_or_path).to(self.device)
 
+        from copy import deepcopy
+        teacher_model = deepcopy(ttt_model).to(self.device).eval()
+        for p in teacher_model.parameters():
+            p.requires_grad_(False)
+
+        
+        output = self.initial_inference(image, teacher_model, intrinsics, fov_x, config['use_scale'])
 
         if config["model"]['freeze_encoder']:
             if self.version == 'v1':
@@ -154,18 +160,23 @@ class Baseline(MGEBaselineInterface):
             [p for p in ttt_model.parameters() if p.requires_grad],
             **optimizer_config
         )
-        
+
         # Setup mixed-precision training scaler
         scaler = torch.amp.GradScaler(enabled=self.use_fp16)
-        
+
         num_ttt_steps = config["num_ttt_steps"]
         grad_accum_steps = config["grad_accum_steps"]
 
         losses_logs = list()
 
-        for step in range(num_ttt_steps):
-            optimizer.zero_grad()
+        # EMA helper
+        ema_decay = config.get("ema_decay", 0.999)
+        @torch.no_grad()
+        def ema_update(teacher, student, decay=ema_decay):
+            for tp, sp in zip(teacher.parameters(), student.parameters()):
+                tp.data.mul_(decay).add_(sp.data, alpha=1.0 - decay)
 
+        for step in range(num_ttt_steps):
             # Generate a batch of jittered/augmented views from the single input image
             batch = generate_jittered_batch(image, output, config['batch_size'],
                                             **config['augs'])
@@ -175,7 +186,7 @@ class Baseline(MGEBaselineInterface):
                 # Forward pass through the model being adapted
                 ttt_output = ttt_model(batch['images'], num_tokens=self.num_tokens)
 
-                if self.version == 'v2':
+                if self.version == 'v2' and config['use_scale']:
                     ttt_output["points"] = ttt_output["points"] * ttt_output["metric_scale"][:, None, None, None]
 
                 # Combine original data and model output for loss calculation
@@ -200,7 +211,15 @@ class Baseline(MGEBaselineInterface):
                 scaler.update()
                 optimizer.zero_grad()
 
-                output = self.initial_inference(image, ttt_model, intrinsics, fov_x)
+
+            if (step + 1) % (grad_accum_steps * config.get("teacher_update_freq", 3)) == 0:
+                # --- EMA teacher update ---
+                with torch.no_grad():
+                    ema_update(teacher_model, ttt_model)
+                    # refresh teacher outputs for the next iteration
+                    output = self.initial_inference(image.to(self.device), teacher_model, intrinsics,
+                                                    fov_x, use_scale=config['use_scale'])
+
         
         # -------------------- END: Test-Time Training Loop -------------------- #
         with torch.inference_mode():
