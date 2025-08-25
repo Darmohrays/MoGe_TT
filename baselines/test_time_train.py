@@ -199,6 +199,7 @@ class Baseline(MGEBaselineInterface):
                 losses_logs.append({loss_name: loss_value.item() for loss_name, loss_value in losses.items()})
 
                 print('---------------------')
+                print(f"{step}/{num_ttt_steps}")
                 print(loss)
                 print('---------------------')
 
@@ -223,7 +224,7 @@ class Baseline(MGEBaselineInterface):
         
         # -------------------- END: Test-Time Training Loop -------------------- #
         with torch.inference_mode():
-            output_ttt = ttt_model.infer(image, fov_x=fov_x, apply_mask=False,
+            output_ttt = teacher_model.infer(image, fov_x=fov_x, apply_mask=False,
                                          num_tokens=self.num_tokens, use_fp16=self.use_fp16)
 
 
