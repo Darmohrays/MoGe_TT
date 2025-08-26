@@ -1,0 +1,30 @@
+{
+    "model": {
+        "freeze_norm_layers": false,
+        "freeze_encoder": true,
+        "freeze_heads": false,
+        "freeze_neck": false
+    },
+    "loss": {
+            "global": {"function": "affine_invariant_global_loss", "weight": 1.0, "params": {"align_resolution": 32}},
+            "patch_4": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 4, "align_resolution": 16, "num_patches": 16}},
+            "patch_16": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 16, "align_resolution": 8, "num_patches": 256}},
+            "patch_64": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 64, "align_resolution": 4, "num_patches": 4096}},
+            "mask": {"function": "mask_l2_loss", "weight": 1.0}
+        },
+    "num_ttt_steps": 512,
+    "grad_accum_steps": 32,
+    "batch_size": 2,
+    "teacher_update_freq": 3,
+    "optim_name": "AdamW",
+    "use_scale": true,
+    "optim": {
+        "lr": 5e-4,
+        "weight_decay": 1e-4
+    },
+    "augs":
+    {
+        "geometric_aug_severity": 2,
+        "color_aug_severity": 3
+    }
+}

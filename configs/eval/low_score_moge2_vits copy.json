@@ -1,0 +1,33 @@
+{
+    "ETH3D": {
+        "path": "/media/sviatoslav/drive4tb/datasets/monocular_depth/low_score_moge2_vits/ETH3D",
+        "width": 1024,
+        "height": 682,
+        "split": ".index.txt",
+        "include_segmentation": true,
+        "depth_unit": 1
+    },
+    "DDAD": {
+        "path": "/media/sviatoslav/drive4tb/datasets/monocular_depth/low_score_moge2_vits/DDAD",
+        "width": 1400,
+        "height": 700,
+        "include_segmentation": true,
+        "split": ".index.txt",
+        "depth_unit": 1.0
+    },
+    "DIODE": {
+        "path": "/media/sviatoslav/drive4tb/datasets/monocular_depth/low_score_moge2_vits/DIODE",
+        "width": 1024,
+        "height": 768,
+        "split": ".index.txt",
+        "include_segmentation": true,
+        "depth_unit": 1.0
+    },
+    "Spring": {
+        "path": "/media/sviatoslav/drive4tb/datasets/monocular_depth/low_score_moge2_vits/Spring",
+        "width": 1360,
+        "height": 768,
+        "split": ".index.txt",
+        "has_sharp_boundary": true
+    }
+}
