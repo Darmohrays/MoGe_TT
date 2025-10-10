@@ -1,7 +1,7 @@
 {
     "model": {
         "freeze_norm_layers": false,
-        "freeze_encoder": true,
+        "freeze_encoder": false,
         "freeze_heads": false,
         "freeze_neck": false
     },
@@ -12,12 +12,11 @@
             "patch_64": {"function": "affine_invariant_local_loss", "weight": 1.0, "params": {"level": 64, "align_resolution": 4, "num_patches": 4096}},
             "mask": {"function": "mask_l2_loss", "weight": 1.0}
         },
-    "num_ttt_steps": 512,
+    "use_scale": true,
+    "num_ttt_steps": 1024,
     "grad_accum_steps": 32,
     "batch_size": 2,
-    "teacher_update_freq": 3,
     "optim_name": "AdamW",
-    "use_scale": true,
     "optim": {
         "lr": 5e-4,
         "weight_decay": 1e-4
@@ -25,6 +24,6 @@
     "augs":
     {
         "geometric_aug_severity": 1,
-        "color_aug_severity": 2
+        "color_aug_severity": 3
     }
 }

@@ -19,12 +19,12 @@
     "optim_name": "AdamW",
     "use_scale": true,
     "optim": {
-        "lr": 5e-4,
-        "weight_decay": 1e-4
+        "lr": 1e-3,
+        "weight_decay": 1e-3
     },
     "augs":
     {
         "geometric_aug_severity": 1,
-        "color_aug_severity": 2
+        "color_aug_severity": 3
     }
 }

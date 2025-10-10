@@ -1,9 +1,9 @@
 {
     "model": {
         "freeze_norm_layers": false,
-        "freeze_encoder": true,
-        "freeze_heads": false,
-        "freeze_neck": false
+        "freeze_encoder": false,
+        "freeze_heads": true,
+        "freeze_neck": true
     },
     "loss": {
             "global": {"function": "affine_invariant_global_loss", "weight": 1.0, "params": {"align_resolution": 32}},
@@ -16,15 +16,15 @@
     "grad_accum_steps": 32,
     "batch_size": 2,
     "teacher_update_freq": 3,
-    "optim_name": "AdamW",
     "use_scale": true,
+    "optim_name": "SGD",
     "optim": {
         "lr": 5e-4,
-        "weight_decay": 1e-4
+        "weight_decay": 1e-3
     },
     "augs":
     {
         "geometric_aug_severity": 1,
-        "color_aug_severity": 2
+        "color_aug_severity": 3
     }
 }

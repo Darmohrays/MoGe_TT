@@ -222,6 +222,9 @@ class Baseline(MGEBaselineInterface):
                                                     fov_x, use_scale=config['use_scale'])
 
         
+        with torch.no_grad():
+            ema_update(teacher_model, ttt_model)
+
         # -------------------- END: Test-Time Training Loop -------------------- #
         with torch.inference_mode():
             output_ttt = teacher_model.infer(image, fov_x=fov_x, apply_mask=False,
